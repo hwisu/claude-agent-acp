@@ -1509,6 +1509,97 @@ export class ClaudeAcpAgent implements Agent {
     };
   }
 
+  /** ExitPlanMode is the one tool whose permission prompt doubles as a
+   *  mode-selector: the user's choice both approves the plan and switches
+   *  the session into the chosen post-plan mode. Kept in its own method so
+   *  the larger canUseToolBody isn't dominated by this branch's option
+   *  assembly and mode-filtering logic. */
+  private async handleExitPlanModePermission(
+    sessionId: string,
+    session: Session,
+    toolName: Parameters<CanUseTool>[0],
+    toolInput: Parameters<CanUseTool>[1],
+    toolUseID: string,
+    signal: AbortSignal,
+    suggestions: Parameters<CanUseTool>[2]["suggestions"],
+    supportsTerminalOutput: boolean,
+  ): Promise<PermissionResult> {
+    const optionsAll = [
+      { kind: "allow_always", name: 'Yes, and use "auto" mode', optionId: "auto" },
+      {
+        kind: "allow_always",
+        name: "Yes, and auto-accept edits",
+        optionId: "acceptEdits",
+      },
+      { kind: "allow_once", name: "Yes, and manually approve edits", optionId: "default" },
+      { kind: "reject_once", name: "No, keep planning", optionId: "plan" },
+    ];
+    if (ALLOW_BYPASS) {
+      optionsAll.unshift({
+        kind: "allow_always",
+        name: "Yes, and bypass permissions",
+        optionId: "bypassPermissions",
+      });
+    }
+    // Filter against the session's currently-advertised modes so we never
+    // present options the active model can't honor (e.g. `auto` on Haiku).
+    // `bypassPermissions` is already covered by `availableModes` via
+    // `buildAvailableModes`/`ALLOW_BYPASS`. The `plan` option is a
+    // "keep planning" reject path; it's always present in `availableModes`.
+    const options = optionsAll.filter((o) =>
+      session.modes.availableModes.some((m) => m.id === o.optionId),
+    );
+
+    const response = await this.client.requestPermission({
+      options,
+      sessionId,
+      toolCall: {
+        toolCallId: toolUseID,
+        rawInput: toolInput,
+        ...toolInfoFromToolUse(
+          { name: toolName, input: toolInput, id: toolUseID },
+          supportsTerminalOutput,
+          session.cwd,
+        ),
+      },
+    });
+
+    if (signal.aborted || response.outcome?.outcome === "cancelled") {
+      throw new Error("Tool use aborted");
+    }
+    const selectedMode =
+      response.outcome?.outcome === "selected" ? response.outcome.optionId : undefined;
+    const selectedModeWasOffered = options.some((option) => option.optionId === selectedMode);
+    if (
+      selectedModeWasOffered &&
+      (selectedMode === "default" ||
+        selectedMode === "acceptEdits" ||
+        selectedMode === "auto" ||
+        selectedMode === "bypassPermissions")
+    ) {
+      await this.client.sessionUpdate({
+        sessionId,
+        update: {
+          sessionUpdate: "current_mode_update",
+          currentModeId: selectedMode,
+        },
+      });
+      await this.updateConfigOption(sessionId, "mode", selectedMode);
+
+      return {
+        behavior: "allow",
+        updatedInput: toolInput,
+        updatedPermissions: suggestions ?? [
+          { type: "setMode", mode: selectedMode, destination: "session" },
+        ],
+      };
+    }
+    return {
+      behavior: "deny",
+      message: "User rejected request to exit plan mode.",
+    };
+  }
+
   private async canUseToolBody(
     sessionId: string,
     toolName: Parameters<CanUseTool>[0],
@@ -1526,81 +1617,16 @@ export class ClaudeAcpAgent implements Agent {
     }
 
     if (toolName === "ExitPlanMode") {
-      const optionsAll = [
-        { kind: "allow_always", name: 'Yes, and use "auto" mode', optionId: "auto" },
-        {
-          kind: "allow_always",
-          name: "Yes, and auto-accept edits",
-          optionId: "acceptEdits",
-        },
-        { kind: "allow_once", name: "Yes, and manually approve edits", optionId: "default" },
-        { kind: "reject_once", name: "No, keep planning", optionId: "plan" },
-      ];
-      if (ALLOW_BYPASS) {
-        optionsAll.unshift({
-          kind: "allow_always",
-          name: "Yes, and bypass permissions",
-          optionId: "bypassPermissions",
-        });
-      }
-      // Filter against the session's currently-advertised modes so we never
-      // present options the active model can't honor (e.g. `auto` on Haiku).
-      // `bypassPermissions` is already covered by `availableModes` via
-      // `buildAvailableModes`/`ALLOW_BYPASS`. The `plan` option is a
-      // "keep planning" reject path; it's always present in `availableModes`.
-      const options = optionsAll.filter((o) =>
-        session.modes.availableModes.some((m) => m.id === o.optionId),
-      );
-
-      const response = await this.client.requestPermission({
-        options,
+      return await this.handleExitPlanModePermission(
         sessionId,
-        toolCall: {
-          toolCallId: toolUseID,
-          rawInput: toolInput,
-          ...toolInfoFromToolUse(
-            { name: toolName, input: toolInput, id: toolUseID },
-            supportsTerminalOutput,
-            session?.cwd,
-          ),
-        },
-      });
-
-      if (signal.aborted || response.outcome?.outcome === "cancelled") {
-        throw new Error("Tool use aborted");
-      }
-      const selectedMode =
-        response.outcome?.outcome === "selected" ? response.outcome.optionId : undefined;
-      const selectedModeWasOffered = options.some((option) => option.optionId === selectedMode);
-      if (
-        selectedModeWasOffered &&
-        (selectedMode === "default" ||
-          selectedMode === "acceptEdits" ||
-          selectedMode === "auto" ||
-          selectedMode === "bypassPermissions")
-      ) {
-        await this.client.sessionUpdate({
-          sessionId,
-          update: {
-            sessionUpdate: "current_mode_update",
-            currentModeId: selectedMode,
-          },
-        });
-        await this.updateConfigOption(sessionId, "mode", selectedMode);
-
-        return {
-          behavior: "allow",
-          updatedInput: toolInput,
-          updatedPermissions: suggestions ?? [
-            { type: "setMode", mode: selectedMode, destination: "session" },
-          ],
-        };
-      } else {
-        return {
-          behavior: "deny",
-          message: "User rejected request to exit plan mode.",
-        };
-      }
+        session,
+        toolName,
+        toolInput,
+        toolUseID,
+        signal,
+        suggestions,
+        supportsTerminalOutput,
+      );
     }
 
     if (session.modes.currentModeId === "bypassPermissions") {
