@@ -87,12 +87,24 @@ import {
   toolUpdateFromDiffToolResponse,
   toolUpdateFromToolResult,
 } from "./tools.js";
-import { nodeToWebReadable, nodeToWebWritable, Pushable, unreachable } from "./utils.js";
+import { Logger, nodeToWebReadable, nodeToWebWritable, Pushable, unreachable } from "./utils.js";
 
 export const CLAUDE_CONFIG_DIR =
   process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude");
 
 const MAX_TITLE_LENGTH = 256;
+
+/** Narrow `SessionMessage.message` (typed `unknown` by the SDK) to the
+ *  `{ role, content }` shape the replay path needs. Returns null when the
+ *  payload doesn't match — caller skips such entries. */
+function unwrapSessionMessage(
+  raw: unknown,
+): { role: "user" | "assistant"; content: unknown } | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const obj = raw as { role?: unknown; content?: unknown };
+  if (obj.role !== "user" && obj.role !== "assistant") return null;
+  return { role: obj.role, content: obj.content };
+}
 
 function sanitizeTitle(text: string): string {
   // Replace newlines and collapse whitespace
@@ -106,13 +118,8 @@ function sanitizeTitle(text: string): string {
   return sanitized.slice(0, MAX_TITLE_LENGTH - 1) + "…";
 }
 
-/**
- * Logger interface for customizing logging output
- */
-export interface Logger {
-  log: (...args: any[]) => void;
-  error: (...args: any[]) => void;
-}
+// Logger re-exported for backwards-compat; canonical definition is in utils.ts.
+export type { Logger } from "./utils.js";
 
 type AccumulatedUsage = {
   inputTokens: number;
@@ -1431,19 +1438,18 @@ export class ClaudeAcpAgent implements Agent {
     const messages = await getSessionMessages(sessionId);
 
     for (const message of messages) {
-      // @ts-expect-error - untyped in SDK but we handle all of these
-      let content: unknown = message.message.content;
-      // @ts-expect-error - untyped in SDK but we handle all of these
-      if (message.message.role === "user") {
+      const inner = unwrapSessionMessage(message.message);
+      if (!inner) continue;
+      const { role } = inner;
+      let content = inner.content;
+      if (role === "user") {
         content = stripLocalCommandMetadata(content);
         if (content === null) continue;
       }
 
       for (const notification of toAcpNotifications(
-        // @ts-expect-error - untyped in SDK but we handle all of these
-        content,
-        // @ts-expect-error - untyped in SDK but we handle all of these
-        message.message.role,
+        content as Parameters<typeof toAcpNotifications>[0],
+        role,
         sessionId,
         toolUseCache,
         this.client,
@@ -2816,9 +2822,17 @@ function formatUriAsLink(uri: string): string {
   }
 }
 
+type SupportedImageMediaType = "image/jpeg" | "image/png" | "image/gif" | "image/webp";
+const SUPPORTED_IMAGE_MEDIA_TYPES = new Set<string>([
+  "image/jpeg",
+  "image/png",
+  "image/gif",
+  "image/webp",
+]);
+
 export function promptToClaude(prompt: PromptRequest): SDKUserMessage {
-  const content: any[] = [];
-  const context: any[] = [];
+  const content: ContentBlockParam[] = [];
+  const context: ContentBlockParam[] = [];
 
   for (const chunk of prompt.prompt) {
     switch (chunk.type) {
@@ -2858,14 +2872,19 @@ export function promptToClaude(prompt: PromptRequest): SDKUserMessage {
       }
       case "image":
         if (chunk.data) {
-          content.push({
-            type: "image",
-            source: {
-              type: "base64",
-              data: chunk.data,
-              media_type: chunk.mimeType,
-            },
-          });
+          const mediaType = SUPPORTED_IMAGE_MEDIA_TYPES.has(chunk.mimeType)
+            ? (chunk.mimeType as SupportedImageMediaType)
+            : null;
+          if (mediaType) {
+            content.push({
+              type: "image",
+              source: {
+                type: "base64",
+                data: chunk.data,
+                media_type: mediaType,
+              },
+            });
+          }
         } else if (chunk.uri && chunk.uri.startsWith("http")) {
           content.push({
             type: "image",

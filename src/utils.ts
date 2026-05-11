@@ -3,13 +3,23 @@
 import { Readable, Writable } from "node:stream";
 import { WritableStream, ReadableStream } from "node:stream/web";
 import { readFileSync } from "node:fs";
-import { Logger } from "./acp-agent.js";
 import { ClaudeCodeSettings, getManagedSettingsPath } from "./settings.js";
 
+/**
+ * Minimal logger contract used across modules. Lives here (not in
+ * acp-agent.ts) so settings.ts and utils.ts can depend on it without
+ * pulling in the agent module — the circular import that prompted this
+ * type's relocation.
+ */
+export interface Logger {
+  log: (...args: unknown[]) => void;
+  error: (...args: unknown[]) => void;
+}
+
 // Useful for bridging push-based and async-iterator-based code.
-export class Pushable<T> implements AsyncIterable<T> {
+export class Pushable<T> implements AsyncIterable<T, undefined> {
   private queue: T[] = [];
-  private resolvers: ((value: IteratorResult<T>) => void)[] = [];
+  private resolvers: ((value: IteratorResult<T, undefined>) => void)[] = [];
   private done = false;
 
   push(item: T) {
@@ -25,21 +35,21 @@ export class Pushable<T> implements AsyncIterable<T> {
     this.done = true;
     while (this.resolvers.length > 0) {
       const resolve = this.resolvers.shift()!;
-      resolve({ value: undefined as any, done: true });
+      resolve({ value: undefined, done: true });
     }
   }
 
-  [Symbol.asyncIterator](): AsyncIterator<T> {
+  [Symbol.asyncIterator](): AsyncIterator<T, undefined> {
     return {
-      next: (): Promise<IteratorResult<T>> => {
+      next: (): Promise<IteratorResult<T, undefined>> => {
         if (this.queue.length > 0) {
           const value = this.queue.shift()!;
           return Promise.resolve({ value, done: false });
         }
         if (this.done) {
-          return Promise.resolve({ value: undefined as any, done: true });
+          return Promise.resolve({ value: undefined, done: true });
         }
-        return new Promise<IteratorResult<T>>((resolve) => {
+        return new Promise<IteratorResult<T, undefined>>((resolve) => {
           this.resolvers.push(resolve);
         });
       },

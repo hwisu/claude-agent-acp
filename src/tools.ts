@@ -21,6 +21,7 @@ import {
   WebSearchInput,
 } from "@anthropic-ai/claude-agent-sdk/sdk-tools.js";
 import {
+  ContentBlockParam,
   ImageBlockParam,
   TextBlockParam,
   ToolResultBlockParam,
@@ -54,6 +55,16 @@ import {
 } from "@anthropic-ai/sdk/resources/beta.mjs";
 import path from "node:path";
 import { Logger } from "./acp-agent.js";
+
+/** The fields these helpers actually consume on a tool_use content block.
+ *  We `Pick` them off the Anthropic SDK's `ToolUseBlockParam` so any future
+ *  change to `id` / `name` / `input` typings flows through automatically —
+ *  the source of truth lives in the SDK. The discriminator `type` is not
+ *  read by these helpers, so it isn't part of the contract. */
+export type SdkToolUseBlock = Pick<
+  Extract<ContentBlockParam, { type: "tool_use" }>,
+  "id" | "input" | "name"
+>;
 
 /**
  * SDK MCP server + tool names used when routing shell execution through the
@@ -177,7 +188,7 @@ export function toDisplayPath(filePath: string, cwd?: string): string {
 }
 
 export function toolInfoFromToolUse(
-  toolUse: any,
+  toolUse: SdkToolUseBlock,
   supportsTerminalOutput: boolean = false,
   cwd?: string,
 ): ToolInfo {
@@ -486,7 +497,7 @@ export function toolUpdateFromToolResult(
     | BetaTextEditorCodeExecutionToolResultBlockParam
     | BetaRequestMCPToolResultBlockParam
     | BetaToolSearchToolResultBlockParam,
-  toolUse: any | undefined,
+  toolUse: SdkToolUseBlock | undefined,
   supportsTerminalOutput: boolean = false,
 ): ToolUpdate {
   if (

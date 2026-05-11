@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { CLAUDE_CONFIG_DIR } from "./acp-agent.js";
+import type { Logger } from "./utils.js";
 
 /**
  * Permission rule format examples:
@@ -33,7 +34,7 @@ export interface ClaudeCodeSettings {
  */
 async function loadSettingsFile(
   filePath: string | null,
-  logger?: { error: (...args: any[]) => void },
+  logger?: Pick<Logger, "error">,
 ): Promise<ClaudeCodeSettings> {
   if (!filePath) {
     return {};
@@ -69,7 +70,7 @@ export function getManagedSettingsPath(): string {
 
 export interface SettingsManagerOptions {
   onChange?: () => void;
-  logger?: { log: (...args: any[]) => void; error: (...args: any[]) => void };
+  logger?: Logger;
 }
 
 /**
@@ -92,7 +93,7 @@ export class SettingsManager {
   private mergedSettings: ClaudeCodeSettings = {};
   private watchers: fs.FSWatcher[] = [];
   private onChange?: () => void;
-  private logger: { log: (...args: any[]) => void; error: (...args: any[]) => void };
+  private logger: Logger;
   private initialized = false;
   private disposed = false;
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
