@@ -47,10 +47,10 @@ This fork's version mirrors the underlying `@anthropic-ai/claude-agent-sdk` vers
 Two helper scripts enforce this:
 
 ```bash
-npm install                          # install/refresh the SDK at its pinned version
-npm run sync-sdk-version             # set package.version := SDK base (e.g. 0.2.132)
-npm run sync-sdk-version -- --bump   # bump the -N suffix for a fork-only patch
-npm run sync-sdk-version -- --check  # CI guard: fail if version drifts from SDK
+aube install                          # install/refresh the SDK at its pinned version
+aube run sync-sdk-version             # set package.version := SDK base (e.g. 0.2.132)
+aube run sync-sdk-version -- --bump   # bump the -N suffix for a fork-only patch
+aube run sync-sdk-version -- --check  # CI guard: fail if version drifts from SDK
 ```
 
 `prepublishOnly` runs `sync-sdk-version` automatically before each publish.
@@ -79,14 +79,23 @@ The agent never `exec`s the command itself. The client does. The agent waits for
 ## Installation
 
 ```bash
-npm install -g @hwisu/claude-agent-acp
+aube install -g @hwisu/claude-agent-acp
 claude-agent-acp
 ```
 
 Or as a dev dependency:
 
 ```bash
-npm install @hwisu/claude-agent-acp
+aube add @hwisu/claude-agent-acp
+```
+
+The package is published as a regular npm tarball, so `npm install -g @hwisu/claude-agent-acp` / `pnpm add` / `yarn add` all work too — but **this repository itself uses [aube](https://aube.en.dev) as its package manager** (see `aube-lock.yaml` and the `packageManager` field). To work on the fork:
+
+```bash
+brew install endevco/tap/aube      # or: mise use -g aube
+aube ci                            # frozen-lockfile install
+aube run check && aube run build   # lint+format check, then tsc
+aube run test:run                  # vitest --run
 ```
 
 ## Contribution Policy

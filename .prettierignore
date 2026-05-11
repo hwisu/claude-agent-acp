@@ -5,3 +5,4 @@ dist
 .release-please-manifest.json
 release-please-config.json
 CHANGELOG.md
+aube-lock.yaml

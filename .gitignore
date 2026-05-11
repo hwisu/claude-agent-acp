@@ -3,3 +3,5 @@ dist
 .DS_Store
 .claude/*.local.*
 CLAUDE.local.md
+# aube diagnostic traces (opt-in via --diag full)
+aube-diag.jsonl

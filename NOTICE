@@ -1,0 +1,45 @@
+@hwisu/claude-agent-acp
+=======================
+
+This product is a fork of @agentclientprotocol/claude-agent-acp,
+Copyright 2025 Zed Industries, Inc. and contributors,
+released under the Apache License, Version 2.0.
+
+  Original source:  https://github.com/agentclientprotocol/claude-agent-acp
+  Fork source:      https://github.com/hwisu/claude-agent-acp
+
+Modifications in this fork are Copyright 2026 hwisu, and are likewise
+licensed under the Apache License, Version 2.0. All upstream commits are
+preserved in the fork's git history.
+
+Files modified in this fork (Apache-2.0 §4(b) prominent-notice):
+
+  - src/acp-agent.ts     ACP terminal-capability routing, MCP server
+                         factory, per-session toolUseID FIFO, and
+                         run_in_background plumbing.
+  - src/tools.ts         ACP terminal tool-name recognition, structured
+                         `_meta.terminal_exit` emission, and exit-code
+                         trailer parsing.
+  - package.json         Renamed to `@hwisu/claude-agent-acp`; version
+                         tracks the bundled `@anthropic-ai/claude-agent-sdk`.
+  - README.md            Rewritten with fork attribution, design
+                         principles, versioning convention, and an
+                         ACP-terminal-flow diagram.
+
+Files added in this fork:
+
+  - NOTICE                       This file.
+  - script/sync-sdk-version.mjs  CI/release helper that keeps
+                                 `package.version` aligned with the
+                                 resolved Claude Agent SDK version.
+
+Trademark notice (Apache-2.0 §6 — the License does not grant trademark
+rights):
+
+  "Claude" and "Claude Agent SDK" are trademarks of Anthropic, PBC.
+  "Zed" is a trademark of Zed Industries, Inc.
+
+  This fork is not affiliated with, endorsed by, or sponsored by either
+  Anthropic, PBC or Zed Industries, Inc. The package name retains
+  "claude" purely to indicate the SDK it wraps, following the upstream
+  project's existing naming.

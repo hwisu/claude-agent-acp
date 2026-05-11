@@ -1,3 +1,5 @@
+// Modified in the @hwisu/claude-agent-acp fork (Apache-2.0). See NOTICE.
+// Original: agentclientprotocol/claude-agent-acp (© 2025 Zed Industries).
 import {
   Agent,
   AgentSideConnection,

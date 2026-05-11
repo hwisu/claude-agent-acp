@@ -23,23 +23,25 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
 
-      - name: Use Node.js
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+      - name: Set up aube + Node.js
+        uses: endevco/aube-action@v1
         with:
           node-version: "lts/*"
-          cache: "npm"
 
-      - name: Install dependencies
-        run: npm ci
+      - name: Install dependencies (frozen lockfile)
+        run: aube ci
 
       - name: Check formatting
-        run: npm run format:check
+        run: aube run format:check
 
       - name: Run linter
-        run: npm run lint
+        run: aube run lint
 
       - name: Build
-        run: npm run build
+        run: aube run build
 
       - name: Run tests
-        run: npm run test:run
+        run: aube run test:run
+
+      - name: Verify version tracks SDK
+        run: aube run sync-sdk-version -- --check

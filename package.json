@@ -23,24 +23,26 @@
     "!dist/tests/",
     "README.md",
     "LICENSE",
+    "NOTICE",
     "package.json"
   ],
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "dev": "npm run build && npm run start",
+    "dev": "aube run build && aube run start",
     "lint": "eslint src --ext .ts",
     "lint:fix": "eslint src --ext .ts --fix",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "check": "npm run lint && npm run format:check",
+    "check": "aube run lint && aube run format:check",
     "test": "vitest",
     "test:integration": "RUN_INTEGRATION_TESTS=true vitest run",
     "test:run": "vitest run",
     "test:coverage": "vitest run --coverage",
     "sync-sdk-version": "node script/sync-sdk-version.mjs",
-    "prepublishOnly": "npm run sync-sdk-version && npm run build"
+    "prepublishOnly": "aube run sync-sdk-version && aube run build"
   },
+  "packageManager": "aube@1.10.3",
   "keywords": [
     "claude",
     "acp",
