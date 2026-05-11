@@ -94,6 +94,20 @@ export const CLAUDE_CONFIG_DIR =
 
 const MAX_TITLE_LENGTH = 256;
 
+// Substring patterns the SDK uses when its CLI subprocess dies. The SDK
+// doesn't surface a typed error, so we match on the message until it does.
+const PROCESS_DEATH_SUBSTRINGS = [
+  "ProcessTransport",
+  "terminated process",
+  "process exited with",
+  "process terminated by signal",
+  "Failed to write to process stdin",
+] as const;
+
+function isClaudeAgentProcessDeath(error: Error): boolean {
+  return PROCESS_DEATH_SUBSTRINGS.some((s) => error.message.includes(s));
+}
+
 /** Narrow `SessionMessage.message` (typed `unknown` by the SDK) to the
  *  `{ role, content }` shape the replay path needs. Returns null when the
  *  payload doesn't match — caller skips such entries. */
@@ -1228,14 +1242,8 @@ export class ClaudeAcpAgent implements Agent {
       if (error instanceof RequestError || !(error instanceof Error)) {
         throw error;
       }
-      const message = error.message;
-      if (
-        message.includes("ProcessTransport") ||
-        message.includes("terminated process") ||
-        message.includes("process exited with") ||
-        message.includes("process terminated by signal") ||
-        message.includes("Failed to write to process stdin")
-      ) {
+      if (isClaudeAgentProcessDeath(error)) {
+        const message = error.message;
         this.logger.error(`Session ${params.sessionId}: Claude Agent process died: ${message}`);
         session.settingsManager.dispose();
         session.input.end();
@@ -1292,9 +1300,17 @@ export class ClaudeAcpAgent implements Agent {
     delete this.sessions[sessionId];
   }
 
-  /** Tear down all active sessions. Called when the ACP connection closes. */
+  /** Tear down all active sessions. Called when the ACP connection closes.
+   *  Uses allSettled so one session's teardown failure doesn't strand the rest. */
   async dispose(): Promise<void> {
-    await Promise.all(Object.keys(this.sessions).map((id) => this.teardownSession(id)));
+    const results = await Promise.allSettled(
+      Object.keys(this.sessions).map((id) => this.teardownSession(id)),
+    );
+    for (const result of results) {
+      if (result.status === "rejected") {
+        this.logger.error("Session teardown failed:", result.reason);
+      }
+    }
   }
 
   async closeSession(params: CloseSessionRequest): Promise<CloseSessionResponse> {
@@ -1407,7 +1423,7 @@ export class ClaudeAcpAgent implements Agent {
       case "plan":
         break;
       default:
-        throw new Error("Invalid Mode");
+        throw new Error(`Invalid mode: ${modeId}`);
     }
 
     const session = this.sessions[sessionId];
@@ -1423,12 +1439,12 @@ export class ClaudeAcpAgent implements Agent {
     } catch (error) {
       if (error instanceof Error) {
         if (!error.message) {
-          error.message = "Invalid Mode";
+          error.message = `Invalid mode: ${modeId}`;
         }
         throw error;
       } else {
         // eslint-disable-next-line preserve-caught-error
-        throw new Error("Invalid Mode");
+        throw new Error(`Invalid mode: ${modeId}`);
       }
     }
   }

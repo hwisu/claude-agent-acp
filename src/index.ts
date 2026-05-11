@@ -47,26 +47,31 @@ if (process.argv.includes("--cli")) {
   console.warn = console.error;
   console.debug = console.error;
 
-  process.on("unhandledRejection", (reason, promise) => {
-    console.error("Unhandled Rejection at:", promise, "reason:", reason);
-  });
-
   const { connection, agent } = runAcp();
 
-  async function shutdown() {
+  async function shutdown(exitCode = 0) {
     await agent.dispose().catch((err) => {
       console.error("Error during cleanup:", err);
     });
-    process.exit(0);
+    process.exit(exitCode);
   }
+
+  // An unhandled rejection in an ACP bridge usually means inconsistent
+  // session/transport state. Log, mark a non-zero exit code, and tear
+  // down cleanly on the next tick rather than soldiering on.
+  process.on("unhandledRejection", (reason, promise) => {
+    console.error("Unhandled Rejection at:", promise, "reason:", reason);
+    process.exitCode = 1;
+    shutdown(1);
+  });
 
   // Exit cleanly when the ACP connection closes (e.g. stdin EOF, transport
   // error). Without this, `process.stdin.resume()` keeps the event loop
   // alive indefinitely, causing orphan process accumulation in oneshot mode.
-  connection.closed.then(shutdown);
+  connection.closed.then(() => shutdown());
 
-  process.on("SIGTERM", shutdown);
-  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", () => shutdown());
+  process.on("SIGINT", () => shutdown());
 
   // Keep process alive while connection is open
   process.stdin.resume();

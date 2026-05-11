@@ -367,7 +367,7 @@ describe("session config options", () => {
     it("does not send config_option_update for an invalid mode", async () => {
       await expect(
         agent.setSessionMode({ sessionId: SESSION_ID, modeId: "not-a-mode" as any }),
-      ).rejects.toThrow("Invalid Mode");
+      ).rejects.toThrow("Invalid mode: not-a-mode");
 
       const configUpdate = sessionUpdates.find(
         (n) => n.update.sessionUpdate === "config_option_update",
