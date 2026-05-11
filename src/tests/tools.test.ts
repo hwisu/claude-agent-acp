@@ -12,6 +12,9 @@ import {
 } from "@anthropic-ai/sdk/resources/beta.mjs";
 import { toAcpNotifications, ToolUseCache, Logger } from "../acp-agent.js";
 import {
+  ACP_TERMINAL_TOOL_NAME,
+  formatAcpTerminalMeta,
+  parseAcpTerminalMeta,
   toolUpdateFromToolResult,
   createPostToolUseHook,
   toolInfoFromToolUse,
@@ -1539,5 +1542,175 @@ describe("toAcpNotifications - TodoWrite with undefined input regression", () =>
 
     const planUpdates = notifications.filter((n) => (n.update as any).sessionUpdate === "plan");
     expect(planUpdates).toHaveLength(1);
+  });
+});
+
+describe("ACP terminal meta tag round-trip", () => {
+  it("format produces the canonical trailer", () => {
+    expect(formatAcpTerminalMeta(0, null, false)).toBe(
+      "<<<acp-terminal-meta exit_code=0 signal=null timed_out=false>>>",
+    );
+    expect(formatAcpTerminalMeta(127, "SIGTERM", true)).toBe(
+      "<<<acp-terminal-meta exit_code=127 signal=SIGTERM timed_out=true>>>",
+    );
+    expect(formatAcpTerminalMeta(null, null, false)).toBe(
+      "<<<acp-terminal-meta exit_code=null signal=null timed_out=false>>>",
+    );
+  });
+
+  it("parse extracts integer exit_code, signal name, and timed_out boolean", () => {
+    const { cleaned, info } = parseAcpTerminalMeta(
+      "hello world\n<<<acp-terminal-meta exit_code=2 signal=SIGINT timed_out=true>>>",
+    );
+    expect(info).toEqual({ exitCode: 2, signal: "SIGINT", timedOut: true });
+    expect(cleaned).toBe("hello world");
+  });
+
+  it("parse handles null exit_code and null signal", () => {
+    const { info } = parseAcpTerminalMeta(
+      "<<<acp-terminal-meta exit_code=null signal=null timed_out=false>>>",
+    );
+    expect(info).toEqual({ exitCode: null, signal: null, timedOut: false });
+  });
+
+  it("parse handles negative exit codes", () => {
+    const { info } = parseAcpTerminalMeta(
+      "<<<acp-terminal-meta exit_code=-1 signal=null timed_out=false>>>",
+    );
+    expect(info?.exitCode).toBe(-1);
+  });
+
+  it("parse strips the trailer and trailing newlines from the cleaned text", () => {
+    const { cleaned } = parseAcpTerminalMeta(
+      "line one\nline two\n\n<<<acp-terminal-meta exit_code=0 signal=null timed_out=false>>>",
+    );
+    expect(cleaned).toBe("line one\nline two");
+  });
+
+  it("parse returns info:null for text without a trailer", () => {
+    const { cleaned, info } = parseAcpTerminalMeta("just some plain bash output");
+    expect(info).toBeNull();
+    expect(cleaned).toBe("just some plain bash output");
+  });
+
+  it("round-trips through format → parse", () => {
+    const cases: Array<[number | null, string | null, boolean]> = [
+      [0, null, false],
+      [1, null, false],
+      [137, "SIGKILL", false],
+      [null, null, true],
+      [-2, "SIGABRT", true],
+    ];
+    for (const [exitCode, signal, timedOut] of cases) {
+      const trailer = formatAcpTerminalMeta(exitCode, signal, timedOut);
+      const { info } = parseAcpTerminalMeta(`some output\n${trailer}`);
+      expect(info).toEqual({ exitCode, signal, timedOut });
+    }
+  });
+});
+
+describe("toolInfoFromToolUse for ACP_TERMINAL_TOOL_NAME", () => {
+  it("uses input.command as title with kind=execute", () => {
+    const info = toolInfoFromToolUse(
+      { name: ACP_TERMINAL_TOOL_NAME, id: "x1", input: { command: "ls -la" } },
+      true,
+      "/repo",
+    );
+    expect(info.title).toBe("ls -la");
+    expect(info.kind).toBe("execute");
+  });
+
+  it("falls back to 'Terminal' when command is missing", () => {
+    const info = toolInfoFromToolUse(
+      { name: ACP_TERMINAL_TOOL_NAME, id: "x2", input: undefined },
+      false,
+      "/repo",
+    );
+    expect(info.title).toBe("Terminal");
+  });
+
+  it("does NOT emit a terminal content stub even when supportsTerminalOutput=true (client renders its own)", () => {
+    const info = toolInfoFromToolUse(
+      { name: ACP_TERMINAL_TOOL_NAME, id: "x3", input: { command: "echo hi" } },
+      true,
+      "/repo",
+    );
+    expect(info.content.find((c) => (c as { type: string }).type === "terminal")).toBeUndefined();
+  });
+
+  it("uses input.description text when supplied", () => {
+    const info = toolInfoFromToolUse(
+      {
+        name: ACP_TERMINAL_TOOL_NAME,
+        id: "x4",
+        input: { command: "make build", description: "Build the project" },
+      },
+      false,
+      "/repo",
+    );
+    expect(info.content).toEqual([
+      { type: "content", content: { type: "text", text: "Build the project" } },
+    ]);
+  });
+});
+
+describe("toolUpdateFromToolResult for ACP_TERMINAL_TOOL_NAME", () => {
+  const acpToolUse = {
+    type: "tool_use",
+    id: "toolu_acp",
+    name: ACP_TERMINAL_TOOL_NAME,
+    input: { command: "ls" },
+  };
+  const trailer = (exitCode: number | null, signal: string | null, timedOut: boolean) =>
+    formatAcpTerminalMeta(exitCode, signal, timedOut);
+
+  const makeAcpResult = (output: string, exitCode: number | null, signal: string | null) =>
+    ({
+      type: "tool_result" as const,
+      tool_use_id: "toolu_acp",
+      content: [
+        { type: "text" as const, text: output },
+        { type: "text" as const, text: trailer(exitCode, signal, false) },
+      ],
+    }) as ToolResultBlockParam;
+
+  it("extracts numeric exit_code from the trailer into _meta.terminal_exit", () => {
+    const update = toolUpdateFromToolResult(
+      makeAcpResult("a\nb\n", 137, "SIGKILL"),
+      acpToolUse,
+      true,
+    );
+    expect(update._meta?.terminal_exit).toEqual({
+      terminal_id: "toolu_acp",
+      exit_code: 137,
+      signal: "SIGKILL",
+    });
+  });
+
+  it("does NOT emit terminal_output data blob (client owns the PTY)", () => {
+    const update = toolUpdateFromToolResult(makeAcpResult("data", 0, null), acpToolUse, true);
+    expect(update._meta?.terminal_output).toBeUndefined();
+    expect(update._meta?.terminal_info).toBeUndefined();
+  });
+
+  it("strips the trailer line from the displayed output", () => {
+    const update = toolUpdateFromToolResult(makeAcpResult("hello", 0, null), acpToolUse, false);
+    const rendered = (update.content?.[0] as { content?: { text?: string } })?.content?.text ?? "";
+    expect(rendered).not.toContain("acp-terminal-meta");
+    expect(rendered).toContain("hello");
+  });
+
+  it("preserves null exit code when timed out", () => {
+    const result = {
+      type: "tool_result" as const,
+      tool_use_id: "toolu_acp",
+      content: [
+        { type: "text" as const, text: "stuck" },
+        { type: "text" as const, text: trailer(null, null, true) },
+      ],
+    } as ToolResultBlockParam;
+    const update = toolUpdateFromToolResult(result, acpToolUse, true);
+    // timed_out → exit_code defaults to 124 (matching the conventional shell timeout exit).
+    expect(update._meta?.terminal_exit?.exit_code).toBe(124);
   });
 });

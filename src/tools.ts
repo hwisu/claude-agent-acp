@@ -84,7 +84,7 @@ type AcpTerminalExitInfo = {
   timedOut: boolean;
 };
 
-function parseAcpTerminalMeta(text: string): {
+export function parseAcpTerminalMeta(text: string): {
   cleaned: string;
   info: AcpTerminalExitInfo | null;
 } {
@@ -95,6 +95,20 @@ function parseAcpTerminalMeta(text: string): {
   const timedOut = m[3] === "true";
   const cleaned = text.replace(ACP_TERMINAL_META_RE, "").replace(/\n+$/, "");
   return { cleaned, info: { exitCode, signal, timedOut } };
+}
+
+/**
+ * Inverse of `parseAcpTerminalMeta`: build the canonical
+ * `<<<acp-terminal-meta exit_code=N signal=S timed_out=B>>>` trailer.
+ * Exported so the MCP-side bash handler in `acp-agent.ts` and the
+ * parser here share a single source of truth for the wire format.
+ */
+export function formatAcpTerminalMeta(
+  exitCode: number | null,
+  signal: string | null,
+  timedOut: boolean,
+): string {
+  return `${ACP_TERMINAL_META_TAG} exit_code=${exitCode ?? "null"} signal=${signal ?? "null"} timed_out=${timedOut}>>>`;
 }
 
 /**

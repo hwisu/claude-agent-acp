@@ -16,14 +16,20 @@
  *   node script/sync-sdk-version.mjs --check    # verify, don't write
  */
 
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, "..");
 const PKG_PATH = join(ROOT, "package.json");
 const SDK_PKG_PATH = join(ROOT, "node_modules/@anthropic-ai/claude-agent-sdk/package.json");
+
+if (!existsSync(SDK_PKG_PATH)) {
+  console.error(`SDK package.json not found at ${relative(ROOT, SDK_PKG_PATH)}.`);
+  console.error("Install dependencies first: aube install");
+  process.exit(1);
+}
 
 function readJson(path) {
   return JSON.parse(readFileSync(path, "utf8"));

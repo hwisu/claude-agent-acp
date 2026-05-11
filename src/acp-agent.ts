@@ -46,6 +46,7 @@ import {
 } from "@agentclientprotocol/sdk";
 import {
   CanUseTool,
+  PermissionResult,
   createSdkMcpServer,
   getSessionMessages,
   listSessions,
@@ -76,10 +77,10 @@ import packageJson from "../package.json" with { type: "json" };
 import { SettingsManager } from "./settings.js";
 import {
   ACP_TERMINAL_MCP_SERVER_NAME,
-  ACP_TERMINAL_META_TAG,
   ACP_TERMINAL_TOOL_NAME,
   ClaudePlanEntry,
   createPostToolUseHook,
+  formatAcpTerminalMeta,
   planEntries,
   registerHookCallback,
   toolInfoFromToolUse,
@@ -164,10 +165,10 @@ type Session = {
   /** FIFO of SDK `toolUseID`s for ACP-routed bash calls that passed
    *  permission and are awaiting MCP-handler dispatch. The handler shifts
    *  the next id when it runs so it can emit a `tool_call_update` embedding
-   *  the freshly-created ACP terminal under the correct tool call.
-   *  Optional because only sessions started with `clientCapabilities.terminal`
-   *  use this path. */
-  pendingAcpTerminalToolUses?: string[];
+   *  the freshly-created ACP terminal under the correct tool call. Always
+   *  initialized at session construction; stays empty when the client
+   *  doesn't advertise the `terminal` capability. */
+  pendingAcpTerminalToolUses: string[];
 };
 
 /** Compute a stable fingerprint of the session-defining params so we can
@@ -194,272 +195,39 @@ type BackgroundTerminal =
     };
 
 /**
- * Build an SDK MCP server exposing a single `bash` tool that delegates
- * execution to the ACP client's `terminal/*` methods. Wired in when the
- * client advertises `clientCapabilities.terminal === true`; the built-in
- * `Bash` tool is disallowed in that case so the model uses this instead.
- *
- * Flow per call:
- *   1. canUseTool (in the agent) approves the call and pushes the SDK
- *      `toolUseID` onto `session.pendingAcpTerminalToolUses`.
- *   2. The MCP handler shifts that id, creates the terminal, and emits a
- *      `tool_call_update` with `[{type:"terminal", terminalId}]` so the
- *      tool card embeds the live terminal under the existing tool call.
- *   3. The handler waits for exit and returns the captured output plus a
- *      machine-parseable exit trailer (see `ACP_TERMINAL_META_TAG`).
- *
- * `getPendingToolUseId` reads from the session's FIFO at handler-time so
- * we don't have to thread the SDK tool_use_id through MCP `_meta` (which
- * the SDK doesn't currently forward).
+ * Pure-data shape describing how an ACP-routed shell command terminated.
+ * Threads through `buildAcpTerminalContent` and the
+ * `<<<acp-terminal-meta …>>>` trailer back into `parseAcpTerminalMeta` on
+ * the toolResult side (see `src/tools.ts`).
  */
-function createAcpTerminalMcpServer(
-  client: AgentSideConnection,
-  sessionId: string,
-  defaultCwd: string,
-  logger: Logger,
-  getPendingToolUseId: () => string | undefined,
-  backgroundTerminals: { [key: string]: BackgroundTerminal },
-): McpSdkServerConfigWithInstance {
-  // Build the canonical `<<<acp-terminal-meta ...>>>` trailer from terminal
-  // exit info. Parsed back by toolUpdateFromToolResult into structured
-  // `_meta.terminal_exit`.
-  const buildExitTrailer = (
-    exitCode: number | null,
-    signal: string | null,
-    timedOut: boolean,
-  ): string =>
-    `${ACP_TERMINAL_META_TAG} exit_code=${exitCode ?? "null"} signal=${signal ?? "null"} timed_out=${timedOut}>>>`;
+type AcpTerminalExit = {
+  exitCode: number | null;
+  signal: string | null;
+  timedOut: boolean;
+};
 
-  return createSdkMcpServer({
-    name: ACP_TERMINAL_MCP_SERVER_NAME,
-    version: packageJson.version,
-    tools: [
-      tool(
-        "bash",
-        "Execute a shell command in the user's terminal. The command runs in the client's environment with its native terminal UI (live output, scrollback, kill button). Use this for ALL shell commands — there is no separate Bash tool. Set run_in_background=true for long-running processes (dev servers, watchers); use the `output` tool to poll and `kill` to terminate.",
-        {
-          command: z.string().describe("The shell command to execute"),
-          description: z
-            .string()
-            .optional()
-            .describe("Short (5-10 word) description of what the command does"),
-          timeout_ms: z
-            .number()
-            .int()
-            .positive()
-            .optional()
-            .describe(
-              "Maximum execution time in milliseconds. Ignored when run_in_background is true.",
-            ),
-          cwd: z
-            .string()
-            .optional()
-            .describe("Absolute working directory. Defaults to the session cwd."),
-          run_in_background: z
-            .boolean()
-            .optional()
-            .describe(
-              "If true, start the command and return immediately with a terminal_id. Use the `output` tool to poll its output and `kill` to stop it. Always wait for foreground commands; use this for dev servers, watchers, or commands that would otherwise block.",
-            ),
-        },
-        async (args) => {
-          const handle = await client.createTerminal({
-            sessionId,
-            command: "/bin/sh",
-            args: ["-c", args.command],
-            cwd: args.cwd ?? defaultCwd,
-            outputByteLimit: 1_000_000,
-          });
+/**
+ * Build the canonical 2-block ACP-terminal tool result content: the
+ * output (or status) text followed by the structured exit trailer the
+ * tools.ts parser will extract into `_meta.terminal_exit`.
+ */
+function buildAcpTerminalContent(text: string, exit: AcpTerminalExit) {
+  return [
+    { type: "text" as const, text },
+    {
+      type: "text" as const,
+      text: formatAcpTerminalMeta(exit.exitCode, exit.signal, exit.timedOut),
+    },
+  ];
+}
 
-          // Embed the freshly-created terminal under the existing tool_call
-          // card. Without this the tool card is just a textual log while
-          // the live terminal lives only in the client's terminal panel.
-          const toolCallId = getPendingToolUseId();
-          if (toolCallId) {
-            await client
-              .sessionUpdate({
-                sessionId,
-                update: {
-                  sessionUpdate: "tool_call_update",
-                  toolCallId,
-                  content: [{ type: "terminal" as const, terminalId: handle.id }],
-                },
-              })
-              .catch((err) => logger.error?.("ACP terminal sessionUpdate failed:", err));
-          }
-
-          if (args.run_in_background) {
-            // Park the handle; the model will poll via `output` and clean up
-            // via `kill` / `release`. We deliberately don't release here.
-            backgroundTerminals[handle.id] = {
-              handle,
-              status: "started",
-              lastOutput: null,
-            };
-            const initial = await handle.currentOutput();
-            return {
-              content: [
-                {
-                  type: "text" as const,
-                  text: `Started background terminal. terminal_id=${handle.id}\nUse mcp__acp_terminal__output to poll or mcp__acp_terminal__kill to stop it.${initial.output ? `\n\n${initial.output}` : ""}`,
-                },
-                {
-                  type: "text" as const,
-                  text: buildExitTrailer(null, null, false),
-                },
-              ],
-            };
-          }
-
-          let timer: ReturnType<typeof setTimeout> | undefined;
-          let timedOut = false;
-          if (args.timeout_ms !== undefined) {
-            timer = setTimeout(() => {
-              timedOut = true;
-              handle.kill().catch((err) => logger.error?.("ACP terminal kill failed:", err));
-            }, args.timeout_ms);
-          }
-          try {
-            const exit = await handle.waitForExit();
-            const final = await handle.currentOutput();
-            return {
-              content: [
-                { type: "text" as const, text: final.output },
-                {
-                  type: "text" as const,
-                  text: buildExitTrailer(exit.exitCode ?? null, exit.signal ?? null, timedOut),
-                },
-              ],
-              isError: timedOut || (exit.exitCode ?? 0) !== 0,
-            };
-          } finally {
-            if (timer) clearTimeout(timer);
-            await handle
-              .release()
-              .catch((err) => logger.error?.("ACP terminal release failed:", err));
-          }
-        },
-      ),
-
-      tool(
-        "output",
-        "Read current output from a background ACP terminal started with run_in_background=true. Returns accumulated output and exit status if the command has finished.",
-        {
-          terminal_id: z
-            .string()
-            .describe("The terminal_id returned when the background command started"),
-        },
-        async ({ terminal_id }) => {
-          const bg = backgroundTerminals[terminal_id];
-          if (!bg) {
-            return {
-              content: [{ type: "text" as const, text: `No background terminal: ${terminal_id}` }],
-              isError: true,
-            };
-          }
-          if (bg.status === "started") {
-            const out = await bg.handle.currentOutput();
-            const exited = !!out.exitStatus;
-            if (exited) {
-              backgroundTerminals[terminal_id] = {
-                status: "exited",
-                pendingOutput: out,
-              };
-              await bg.handle
-                .release()
-                .catch((err) => logger.error?.("ACP terminal release failed:", err));
-            }
-            return {
-              content: [
-                { type: "text" as const, text: out.output },
-                {
-                  type: "text" as const,
-                  text: buildExitTrailer(
-                    out.exitStatus?.exitCode ?? null,
-                    out.exitStatus?.signal ?? null,
-                    false,
-                  ),
-                },
-              ],
-            };
-          }
-          // Already finalised (exited / killed / aborted / timedOut).
-          return {
-            content: [
-              { type: "text" as const, text: bg.pendingOutput.output },
-              {
-                type: "text" as const,
-                text: buildExitTrailer(
-                  bg.pendingOutput.exitStatus?.exitCode ?? null,
-                  bg.pendingOutput.exitStatus?.signal ?? null,
-                  bg.status === "timedOut",
-                ),
-              },
-            ],
-          };
-        },
-      ),
-
-      tool(
-        "kill",
-        "Stop a background ACP terminal started with run_in_background=true. Captures final output before release.",
-        {
-          terminal_id: z
-            .string()
-            .describe("The terminal_id returned when the background command started"),
-        },
-        async ({ terminal_id }) => {
-          const bg = backgroundTerminals[terminal_id];
-          if (!bg) {
-            return {
-              content: [{ type: "text" as const, text: `No background terminal: ${terminal_id}` }],
-              isError: true,
-            };
-          }
-          if (bg.status !== "started") {
-            return {
-              content: [
-                {
-                  type: "text" as const,
-                  text: `Terminal ${terminal_id} already ${bg.status}`,
-                },
-                {
-                  type: "text" as const,
-                  text: buildExitTrailer(
-                    bg.pendingOutput.exitStatus?.exitCode ?? null,
-                    bg.pendingOutput.exitStatus?.signal ?? null,
-                    bg.status === "timedOut",
-                  ),
-                },
-              ],
-            };
-          }
-          await bg.handle.kill().catch((err) => logger.error?.("ACP terminal kill failed:", err));
-          const out = await bg.handle.currentOutput();
-          backgroundTerminals[terminal_id] = {
-            status: "killed",
-            pendingOutput: out,
-          };
-          await bg.handle
-            .release()
-            .catch((err) => logger.error?.("ACP terminal release failed:", err));
-          return {
-            content: [
-              { type: "text" as const, text: out.output },
-              {
-                type: "text" as const,
-                text: buildExitTrailer(
-                  out.exitStatus?.exitCode ?? null,
-                  out.exitStatus?.signal ?? null,
-                  false,
-                ),
-              },
-            ],
-          };
-        },
-      ),
-    ],
-  });
+/**
+ * Release an ACP terminal handle, swallowing + logging release errors so
+ * cleanup never propagates into the user-facing tool result. Used at
+ * every cleanup site in the bash / output / kill handlers.
+ */
+async function releaseTerminalSafely(handle: TerminalHandle, logger: Logger): Promise<void> {
+  await handle.release().catch((err) => logger.error?.("ACP terminal release failed:", err));
 }
 
 export type SDKMessageFilter = {
@@ -1702,128 +1470,68 @@ export class ClaudeAcpAgent implements Agent {
   }
 
   canUseTool(sessionId: string): CanUseTool {
-    return async (toolName, toolInput, { signal, suggestions, toolUseID }) => {
-      const alwaysAllowLabel = describeAlwaysAllow(suggestions, toolName);
-      const supportsTerminalOutput = this.clientCapabilities?._meta?.["terminal_output"] === true;
-      const session = this.sessions[sessionId];
-      if (!session) {
-        return {
-          behavior: "deny",
-          message: "Session not found",
-        };
-      }
-
+    return async (toolName, toolInput, opts) => {
+      const result = await this.canUseToolBody(sessionId, toolName, toolInput, opts);
       // For ACP-routed bash, the MCP handler needs to know the SDK
       // tool_use_id (so it can emit a tool_call_update that embeds the
       // freshly-created terminal under the right tool card). The SDK
       // doesn't forward tool_use_id through MCP `_meta`, so we hand it
       // off via a per-session FIFO that the handler shifts on entry.
-      // Only push on the allow path so a denial doesn't leak a stale id.
-      const recordAcpTerminalApproval = () => {
-        if (toolName === ACP_TERMINAL_TOOL_NAME) {
-          (session.pendingAcpTerminalToolUses ??= []).push(toolUseID);
-        }
+      // Push only on the allow path so a denial doesn't leak a stale id;
+      // a single post-process here keeps the contract local to canUseTool
+      // and impossible to forget at a future approval branch.
+      if (toolName === ACP_TERMINAL_TOOL_NAME && result.behavior === "allow") {
+        this.sessions[sessionId]?.pendingAcpTerminalToolUses.push(opts.toolUseID);
+      }
+      return result;
+    };
+  }
+
+  private async canUseToolBody(
+    sessionId: string,
+    toolName: Parameters<CanUseTool>[0],
+    toolInput: Parameters<CanUseTool>[1],
+    { signal, suggestions, toolUseID }: Parameters<CanUseTool>[2],
+  ): Promise<PermissionResult> {
+    const alwaysAllowLabel = describeAlwaysAllow(suggestions, toolName);
+    const supportsTerminalOutput = this.clientCapabilities?._meta?.["terminal_output"] === true;
+    const session = this.sessions[sessionId];
+    if (!session) {
+      return {
+        behavior: "deny",
+        message: "Session not found",
       };
+    }
 
-      if (toolName === "ExitPlanMode") {
-        const optionsAll = [
-          { kind: "allow_always", name: 'Yes, and use "auto" mode', optionId: "auto" },
-          {
-            kind: "allow_always",
-            name: "Yes, and auto-accept edits",
-            optionId: "acceptEdits",
-          },
-          { kind: "allow_once", name: "Yes, and manually approve edits", optionId: "default" },
-          { kind: "reject_once", name: "No, keep planning", optionId: "plan" },
-        ];
-        if (ALLOW_BYPASS) {
-          optionsAll.unshift({
-            kind: "allow_always",
-            name: "Yes, and bypass permissions",
-            optionId: "bypassPermissions",
-          });
-        }
-        // Filter against the session's currently-advertised modes so we never
-        // present options the active model can't honor (e.g. `auto` on Haiku).
-        // `bypassPermissions` is already covered by `availableModes` via
-        // `buildAvailableModes`/`ALLOW_BYPASS`. The `plan` option is a
-        // "keep planning" reject path; it's always present in `availableModes`.
-        const options = optionsAll.filter((o) =>
-          session.modes.availableModes.some((m) => m.id === o.optionId),
-        );
-
-        const response = await this.client.requestPermission({
-          options,
-          sessionId,
-          toolCall: {
-            toolCallId: toolUseID,
-            rawInput: toolInput,
-            ...toolInfoFromToolUse(
-              { name: toolName, input: toolInput, id: toolUseID },
-              supportsTerminalOutput,
-              session?.cwd,
-            ),
-          },
+    if (toolName === "ExitPlanMode") {
+      const optionsAll = [
+        { kind: "allow_always", name: 'Yes, and use "auto" mode', optionId: "auto" },
+        {
+          kind: "allow_always",
+          name: "Yes, and auto-accept edits",
+          optionId: "acceptEdits",
+        },
+        { kind: "allow_once", name: "Yes, and manually approve edits", optionId: "default" },
+        { kind: "reject_once", name: "No, keep planning", optionId: "plan" },
+      ];
+      if (ALLOW_BYPASS) {
+        optionsAll.unshift({
+          kind: "allow_always",
+          name: "Yes, and bypass permissions",
+          optionId: "bypassPermissions",
         });
-
-        if (signal.aborted || response.outcome?.outcome === "cancelled") {
-          throw new Error("Tool use aborted");
-        }
-        const selectedMode =
-          response.outcome?.outcome === "selected" ? response.outcome.optionId : undefined;
-        const selectedModeWasOffered = options.some((option) => option.optionId === selectedMode);
-        if (
-          selectedModeWasOffered &&
-          (selectedMode === "default" ||
-            selectedMode === "acceptEdits" ||
-            selectedMode === "auto" ||
-            selectedMode === "bypassPermissions")
-        ) {
-          await this.client.sessionUpdate({
-            sessionId,
-            update: {
-              sessionUpdate: "current_mode_update",
-              currentModeId: selectedMode,
-            },
-          });
-          await this.updateConfigOption(sessionId, "mode", selectedMode);
-
-          return {
-            behavior: "allow",
-            updatedInput: toolInput,
-            updatedPermissions: suggestions ?? [
-              { type: "setMode", mode: selectedMode, destination: "session" },
-            ],
-          };
-        } else {
-          return {
-            behavior: "deny",
-            message: "User rejected request to exit plan mode.",
-          };
-        }
       }
-
-      if (session.modes.currentModeId === "bypassPermissions") {
-        recordAcpTerminalApproval();
-        return {
-          behavior: "allow",
-          updatedInput: toolInput,
-          updatedPermissions: suggestions ?? [
-            { type: "addRules", rules: [{ toolName }], behavior: "allow", destination: "session" },
-          ],
-        };
-      }
+      // Filter against the session's currently-advertised modes so we never
+      // present options the active model can't honor (e.g. `auto` on Haiku).
+      // `bypassPermissions` is already covered by `availableModes` via
+      // `buildAvailableModes`/`ALLOW_BYPASS`. The `plan` option is a
+      // "keep planning" reject path; it's always present in `availableModes`.
+      const options = optionsAll.filter((o) =>
+        session.modes.availableModes.some((m) => m.id === o.optionId),
+      );
 
       const response = await this.client.requestPermission({
-        options: [
-          {
-            kind: "allow_always",
-            name: alwaysAllowLabel,
-            optionId: "allow_always",
-          },
-          { kind: "allow_once", name: "Allow", optionId: "allow" },
-          { kind: "reject_once", name: "Reject", optionId: "reject" },
-        ],
+        options,
         sessionId,
         toolCall: {
           toolCallId: toolUseID,
@@ -1835,41 +1543,327 @@ export class ClaudeAcpAgent implements Agent {
           ),
         },
       });
+
       if (signal.aborted || response.outcome?.outcome === "cancelled") {
         throw new Error("Tool use aborted");
       }
+      const selectedMode =
+        response.outcome?.outcome === "selected" ? response.outcome.optionId : undefined;
+      const selectedModeWasOffered = options.some((option) => option.optionId === selectedMode);
       if (
-        response.outcome?.outcome === "selected" &&
-        (response.outcome.optionId === "allow" || response.outcome.optionId === "allow_always")
+        selectedModeWasOffered &&
+        (selectedMode === "default" ||
+          selectedMode === "acceptEdits" ||
+          selectedMode === "auto" ||
+          selectedMode === "bypassPermissions")
       ) {
-        // If Claude Code has suggestions, it will update their settings already
-        if (response.outcome.optionId === "allow_always") {
-          recordAcpTerminalApproval();
-          return {
-            behavior: "allow",
-            updatedInput: toolInput,
-            updatedPermissions: suggestions ?? [
-              {
-                type: "addRules",
-                rules: [{ toolName }],
-                behavior: "allow",
-                destination: "session",
-              },
-            ],
-          };
-        }
-        recordAcpTerminalApproval();
+        await this.client.sessionUpdate({
+          sessionId,
+          update: {
+            sessionUpdate: "current_mode_update",
+            currentModeId: selectedMode,
+          },
+        });
+        await this.updateConfigOption(sessionId, "mode", selectedMode);
+
         return {
           behavior: "allow",
           updatedInput: toolInput,
+          updatedPermissions: suggestions ?? [
+            { type: "setMode", mode: selectedMode, destination: "session" },
+          ],
         };
       } else {
         return {
           behavior: "deny",
-          message: "User refused permission to run tool",
+          message: "User rejected request to exit plan mode.",
         };
       }
-    };
+    }
+
+    if (session.modes.currentModeId === "bypassPermissions") {
+      return {
+        behavior: "allow",
+        updatedInput: toolInput,
+        updatedPermissions: suggestions ?? [
+          { type: "addRules", rules: [{ toolName }], behavior: "allow", destination: "session" },
+        ],
+      };
+    }
+
+    const response = await this.client.requestPermission({
+      options: [
+        {
+          kind: "allow_always",
+          name: alwaysAllowLabel,
+          optionId: "allow_always",
+        },
+        { kind: "allow_once", name: "Allow", optionId: "allow" },
+        { kind: "reject_once", name: "Reject", optionId: "reject" },
+      ],
+      sessionId,
+      toolCall: {
+        toolCallId: toolUseID,
+        rawInput: toolInput,
+        ...toolInfoFromToolUse(
+          { name: toolName, input: toolInput, id: toolUseID },
+          supportsTerminalOutput,
+          session?.cwd,
+        ),
+      },
+    });
+    if (signal.aborted || response.outcome?.outcome === "cancelled") {
+      throw new Error("Tool use aborted");
+    }
+    if (
+      response.outcome?.outcome === "selected" &&
+      (response.outcome.optionId === "allow" || response.outcome.optionId === "allow_always")
+    ) {
+      // If Claude Code has suggestions, it will update their settings already
+      if (response.outcome.optionId === "allow_always") {
+        return {
+          behavior: "allow",
+          updatedInput: toolInput,
+          updatedPermissions: suggestions ?? [
+            {
+              type: "addRules",
+              rules: [{ toolName }],
+              behavior: "allow",
+              destination: "session",
+            },
+          ],
+        };
+      }
+      return {
+        behavior: "allow",
+        updatedInput: toolInput,
+      };
+    } else {
+      return {
+        behavior: "deny",
+        message: "User refused permission to run tool",
+      };
+    }
+  }
+
+  /**
+   * Build an SDK MCP server exposing `bash` / `output` / `kill` tools that
+   * delegate shell execution to the ACP client's `terminal/*` methods.
+   * Wired in when the client advertises `clientCapabilities.terminal === true`;
+   * the built-in `Bash` tool is disallowed in that case so the model uses
+   * this instead.
+   *
+   * Flow per `bash` call:
+   *   1. `canUseTool` approves and pushes the SDK `toolUseID` onto
+   *      `session.pendingAcpTerminalToolUses`.
+   *   2. The handler shifts that id, creates the terminal, and emits a
+   *      `tool_call_update` with `[{type:"terminal", terminalId}]` so the
+   *      tool card embeds the live terminal under the existing tool call.
+   *   3. The handler waits for exit (foreground) or parks the handle in
+   *      `this.backgroundTerminals` (background) and returns the captured
+   *      output plus a machine-parseable exit trailer.
+   */
+  private createAcpTerminalMcpServer(
+    sessionId: string,
+    defaultCwd: string,
+    getPendingToolUseId: () => string | undefined,
+  ): McpSdkServerConfigWithInstance {
+    const client = this.client;
+    const logger = this.logger;
+    const backgroundTerminals = this.backgroundTerminals;
+
+    return createSdkMcpServer({
+      name: ACP_TERMINAL_MCP_SERVER_NAME,
+      version: packageJson.version,
+      tools: [
+        tool(
+          "bash",
+          "Execute a shell command in the user's terminal. The command runs in the client's environment with its native terminal UI (live output, scrollback, kill button). Use this for ALL shell commands — there is no separate Bash tool. Set run_in_background=true for long-running processes (dev servers, watchers); use the `output` tool to poll and `kill` to terminate.",
+          {
+            command: z.string().describe("The shell command to execute"),
+            description: z
+              .string()
+              .optional()
+              .describe("Short (5-10 word) description of what the command does"),
+            timeout_ms: z
+              .number()
+              .int()
+              .positive()
+              .optional()
+              .describe(
+                "Maximum execution time in milliseconds. Ignored when run_in_background is true.",
+              ),
+            cwd: z
+              .string()
+              .optional()
+              .describe("Absolute working directory. Defaults to the session cwd."),
+            run_in_background: z
+              .boolean()
+              .optional()
+              .describe(
+                "If true, start the command and return immediately with a terminal_id. Use the `output` tool to poll its output and `kill` to stop it. Always wait for foreground commands; use this for dev servers, watchers, or commands that would otherwise block.",
+              ),
+          },
+          async (args) => {
+            const handle = await client.createTerminal({
+              sessionId,
+              command: "/bin/sh",
+              args: ["-c", args.command],
+              cwd: args.cwd ?? defaultCwd,
+              outputByteLimit: 1_000_000,
+            });
+
+            // Embed the freshly-created terminal under the existing tool_call
+            // card so the chat tool card and the client's terminal panel both
+            // reflect the same PTY.
+            const toolCallId = getPendingToolUseId();
+            if (toolCallId) {
+              await client
+                .sessionUpdate({
+                  sessionId,
+                  update: {
+                    sessionUpdate: "tool_call_update",
+                    toolCallId,
+                    content: [{ type: "terminal" as const, terminalId: handle.id }],
+                  },
+                })
+                .catch((err) => logger.error?.("ACP terminal sessionUpdate failed:", err));
+            }
+
+            if (args.run_in_background) {
+              // Park the handle; the model polls via `output` and cleans up
+              // via `kill` / `release`. We deliberately don't release here.
+              backgroundTerminals[handle.id] = {
+                handle,
+                status: "started",
+                lastOutput: null,
+              };
+              const initial = await handle.currentOutput();
+              return {
+                content: buildAcpTerminalContent(
+                  `Started background terminal. terminal_id=${handle.id}\nUse mcp__acp_terminal__output to poll or mcp__acp_terminal__kill to stop it.${initial.output ? `\n\n${initial.output}` : ""}`,
+                  { exitCode: null, signal: null, timedOut: false },
+                ),
+              };
+            }
+
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            let timedOut = false;
+            if (args.timeout_ms !== undefined) {
+              timer = setTimeout(() => {
+                timedOut = true;
+                handle.kill().catch((err) => logger.error?.("ACP terminal kill failed:", err));
+              }, args.timeout_ms);
+            }
+            try {
+              const exit = await handle.waitForExit();
+              const final = await handle.currentOutput();
+              return {
+                content: buildAcpTerminalContent(final.output, {
+                  exitCode: exit.exitCode ?? null,
+                  signal: exit.signal ?? null,
+                  timedOut,
+                }),
+                isError: timedOut || (exit.exitCode ?? 0) !== 0,
+              };
+            } finally {
+              if (timer) clearTimeout(timer);
+              await releaseTerminalSafely(handle, logger);
+            }
+          },
+        ),
+
+        tool(
+          "output",
+          "Read current output from a background ACP terminal started with run_in_background=true. Returns accumulated output and exit status if the command has finished.",
+          {
+            terminal_id: z
+              .string()
+              .describe("The terminal_id returned when the background command started"),
+          },
+          async ({ terminal_id }) => {
+            const bg = backgroundTerminals[terminal_id];
+            if (!bg) {
+              return {
+                content: [
+                  { type: "text" as const, text: `No background terminal: ${terminal_id}` },
+                ],
+                isError: true,
+              };
+            }
+            if (bg.status === "started") {
+              const out = await bg.handle.currentOutput();
+              if (out.exitStatus) {
+                backgroundTerminals[terminal_id] = {
+                  status: "exited",
+                  pendingOutput: out,
+                };
+                await releaseTerminalSafely(bg.handle, logger);
+              }
+              return {
+                content: buildAcpTerminalContent(out.output, {
+                  exitCode: out.exitStatus?.exitCode ?? null,
+                  signal: out.exitStatus?.signal ?? null,
+                  timedOut: false,
+                }),
+              };
+            }
+            // Already finalised (exited / killed / aborted / timedOut).
+            return {
+              content: buildAcpTerminalContent(bg.pendingOutput.output, {
+                exitCode: bg.pendingOutput.exitStatus?.exitCode ?? null,
+                signal: bg.pendingOutput.exitStatus?.signal ?? null,
+                timedOut: bg.status === "timedOut",
+              }),
+            };
+          },
+        ),
+
+        tool(
+          "kill",
+          "Stop a background ACP terminal started with run_in_background=true. Captures final output before release.",
+          {
+            terminal_id: z
+              .string()
+              .describe("The terminal_id returned when the background command started"),
+          },
+          async ({ terminal_id }) => {
+            const bg = backgroundTerminals[terminal_id];
+            if (!bg) {
+              return {
+                content: [
+                  { type: "text" as const, text: `No background terminal: ${terminal_id}` },
+                ],
+                isError: true,
+              };
+            }
+            if (bg.status !== "started") {
+              return {
+                content: buildAcpTerminalContent(`Terminal ${terminal_id} already ${bg.status}`, {
+                  exitCode: bg.pendingOutput.exitStatus?.exitCode ?? null,
+                  signal: bg.pendingOutput.exitStatus?.signal ?? null,
+                  timedOut: bg.status === "timedOut",
+                }),
+              };
+            }
+            await bg.handle.kill().catch((err) => logger.error?.("ACP terminal kill failed:", err));
+            const out = await bg.handle.currentOutput();
+            backgroundTerminals[terminal_id] = {
+              status: "killed",
+              pendingOutput: out,
+            };
+            await releaseTerminalSafely(bg.handle, logger);
+            return {
+              content: buildAcpTerminalContent(out.output, {
+                exitCode: out.exitStatus?.exitCode ?? null,
+                signal: out.exitStatus?.signal ?? null,
+                timedOut: false,
+              }),
+            };
+          },
+        ),
+      ],
+    });
   }
 
   private async sendAvailableCommandsUpdate(sessionId: string): Promise<void> {
@@ -2100,13 +2094,10 @@ export class ClaudeAcpAgent implements Agent {
     // lets the client own the terminal UI (live output, kill button, env).
     const supportsAcpTerminal = this.clientCapabilities?.terminal === true;
     if (supportsAcpTerminal) {
-      mcpServers[ACP_TERMINAL_MCP_SERVER_NAME] = createAcpTerminalMcpServer(
-        this.client,
+      mcpServers[ACP_TERMINAL_MCP_SERVER_NAME] = this.createAcpTerminalMcpServer(
         sessionId,
         params.cwd,
-        this.logger,
-        () => this.sessions[sessionId]?.pendingAcpTerminalToolUses?.shift(),
-        this.backgroundTerminals,
+        () => this.sessions[sessionId]?.pendingAcpTerminalToolUses.shift(),
       );
     }
 

@@ -18,6 +18,7 @@ import {
 } from "@agentclientprotocol/sdk";
 import { nodeToWebWritable, nodeToWebReadable } from "../utils.js";
 import {
+  ACP_TERMINAL_TOOL_NAME,
   markdownEscape,
   toolInfoFromToolUse,
   toDisplayPath,
@@ -1533,6 +1534,7 @@ describe("stop reason propagation", () => {
       abortController: new AbortController(),
       emitRawSDKMessages: false,
       contextWindowSize: 200000,
+      pendingAcpTerminalToolUses: [],
     };
   }
 
@@ -1676,6 +1678,7 @@ describe("stop reason propagation", () => {
       nextPendingOrder: 0,
       emitRawSDKMessages: false,
       contextWindowSize: 200000,
+      pendingAcpTerminalToolUses: [],
     };
 
     const response = await agent.prompt({
@@ -1834,6 +1837,7 @@ describe("session/close", () => {
       abortController: new AbortController(),
       emitRawSDKMessages: false,
       contextWindowSize: 200000,
+      pendingAcpTerminalToolUses: [],
     };
     return agent.sessions[sessionId]!;
   }
@@ -1930,6 +1934,7 @@ describe("getOrCreateSession param change detection", () => {
       abortController: new AbortController(),
       emitRawSDKMessages: false,
       contextWindowSize: 200000,
+      pendingAcpTerminalToolUses: [],
     };
     return agent.sessions[sessionId]!;
   }
@@ -2164,6 +2169,7 @@ describe("usage_update computation", () => {
       abortController: new AbortController(),
       emitRawSDKMessages: false,
       contextWindowSize: 200000,
+      pendingAcpTerminalToolUses: [],
     };
   }
 
@@ -3063,6 +3069,7 @@ describe("emitRawSDKMessages", () => {
       abortController: new AbortController(),
       emitRawSDKMessages,
       contextWindowSize: 200000,
+      pendingAcpTerminalToolUses: [],
     };
   }
 
@@ -3290,6 +3297,7 @@ describe("result origin handling", () => {
       abortController: new AbortController(),
       emitRawSDKMessages: false,
       contextWindowSize: 200000,
+      pendingAcpTerminalToolUses: [],
     };
   }
 
@@ -3409,5 +3417,90 @@ describe("result origin handling", () => {
     });
 
     expect(response.stopReason).toBe("max_tokens");
+  });
+});
+
+describe("ACP terminal canUseTool FIFO", () => {
+  // Helper: instantiate a bare agent with a mock client whose
+  // requestPermission can be steered per-test.
+  function mkAgent(decision: "allow" | "reject") {
+    const mockClient = {
+      requestPermission: async (params: RequestPermissionRequest) => {
+        const optionId = decision === "allow" ? "allow" : "reject";
+        const opt = params.options.find((o) => o.optionId === optionId);
+        return {
+          outcome: { outcome: "selected", optionId: opt?.optionId ?? "reject" },
+        } as RequestPermissionResponse;
+      },
+      sessionUpdate: async () => {},
+    } as unknown as AgentSideConnection;
+    const agent = new ClaudeAcpAgent(mockClient, { log: () => {}, error: () => {} });
+    agent.sessions["s1"] = {
+      query: {} as any,
+      input: new Pushable<any>(),
+      cancelled: false,
+      cwd: "/test",
+      sessionFingerprint: JSON.stringify({ cwd: "/test", mcpServers: [] }),
+      modes: {
+        currentModeId: "default",
+        availableModes: [],
+      },
+      models: {
+        currentModelId: "default",
+        availableModels: [],
+      },
+      modelInfos: [],
+      settingsManager: { dispose: vi.fn() } as any,
+      accumulatedUsage: {
+        inputTokens: 0,
+        outputTokens: 0,
+        cachedReadTokens: 0,
+        cachedWriteTokens: 0,
+      },
+      configOptions: [],
+      promptRunning: false,
+      pendingMessages: new Map(),
+      nextPendingOrder: 0,
+      abortController: new AbortController(),
+      emitRawSDKMessages: false,
+      contextWindowSize: 200000,
+      pendingAcpTerminalToolUses: [],
+    };
+    return agent;
+  }
+
+  it("pushes toolUseID on allow for ACP terminal tool, in order", async () => {
+    const agent = mkAgent("allow");
+    const can = agent.canUseTool("s1");
+    await can(ACP_TERMINAL_TOOL_NAME, { command: "echo 1" }, {
+      signal: new AbortController().signal,
+      toolUseID: "tu_one",
+    } as any);
+    await can(ACP_TERMINAL_TOOL_NAME, { command: "echo 2" }, {
+      signal: new AbortController().signal,
+      toolUseID: "tu_two",
+    } as any);
+    expect(agent.sessions["s1"].pendingAcpTerminalToolUses).toEqual(["tu_one", "tu_two"]);
+  });
+
+  it("does not push on deny", async () => {
+    const agent = mkAgent("reject");
+    const can = agent.canUseTool("s1");
+    const result = await can(ACP_TERMINAL_TOOL_NAME, { command: "echo x" }, {
+      signal: new AbortController().signal,
+      toolUseID: "tu_denied",
+    } as any);
+    expect(result.behavior).toBe("deny");
+    expect(agent.sessions["s1"].pendingAcpTerminalToolUses).toEqual([]);
+  });
+
+  it("does not push for non-ACP tools even when allowed", async () => {
+    const agent = mkAgent("allow");
+    const can = agent.canUseTool("s1");
+    await can("Bash", { command: "ls" }, {
+      signal: new AbortController().signal,
+      toolUseID: "tu_other",
+    } as any);
+    expect(agent.sessions["s1"].pendingAcpTerminalToolUses).toEqual([]);
   });
 });
