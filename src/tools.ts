@@ -54,6 +54,48 @@ import path from "node:path";
 import { Logger } from "./acp-agent.js";
 
 /**
+ * SDK MCP server + tool names used when routing shell execution through the
+ * ACP `terminal/*` methods (instead of the SDK's built-in `Bash` tool).
+ *
+ * Wire format: the model sees the tool as `mcp__acp_terminal__bash`.
+ */
+export const ACP_TERMINAL_MCP_SERVER_NAME = "acp_terminal";
+export const ACP_TERMINAL_TOOL_NAME = "mcp__acp_terminal__bash";
+
+/**
+ * Magic prefix the ACP-routed bash MCP tool appends to its content so that
+ * `toolUpdateFromToolResult` can extract structured exit info (numeric exit
+ * code, signal name, timeout flag). The trailer is stripped before display.
+ *
+ * Format: `<<<acp-terminal-meta exit_code=N signal=S timed_out=B>>>`
+ *   - exit_code: integer or "null"
+ *   - signal: signal name or "null"
+ *   - timed_out: "true" or "false"
+ */
+export const ACP_TERMINAL_META_TAG = "<<<acp-terminal-meta";
+const ACP_TERMINAL_META_RE =
+  /<<<acp-terminal-meta exit_code=(-?\d+|null) signal=(\S+) timed_out=(true|false)>>>/;
+
+type AcpTerminalExitInfo = {
+  exitCode: number | null;
+  signal: string | null;
+  timedOut: boolean;
+};
+
+function parseAcpTerminalMeta(text: string): {
+  cleaned: string;
+  info: AcpTerminalExitInfo | null;
+} {
+  const m = text.match(ACP_TERMINAL_META_RE);
+  if (!m) return { cleaned: text, info: null };
+  const exitCode = m[1] === "null" ? null : parseInt(m[1], 10);
+  const signal = m[2] === "null" ? null : m[2];
+  const timedOut = m[3] === "true";
+  const cleaned = text.replace(ACP_TERMINAL_META_RE, "").replace(/\n+$/, "");
+  return { cleaned, info: { exitCode, signal, timedOut } };
+}
+
+/**
  * Union of all possible content types that can appear in tool results from the Anthropic SDK.
  * These are transformed to valid ACP ContentBlock types by toValidAcpContent().
  */
@@ -144,21 +186,27 @@ export function toolInfoFromToolUse(
       };
     }
 
-    case "Bash": {
+    case "Bash":
+    case ACP_TERMINAL_TOOL_NAME: {
       const input = toolUse.input as BashInput | undefined;
+      // When routing through ACP terminals, the client creates its own
+      // terminal and renders it directly — embedding a stub terminalId
+      // referencing the SDK tool_use_id would confuse it.
+      const isAcpTerminal = name === ACP_TERMINAL_TOOL_NAME;
       return {
         title: input?.command ? input.command : "Terminal",
         kind: "execute",
-        content: supportsTerminalOutput
-          ? [{ type: "terminal" as const, terminalId: toolUse.id }]
-          : input && input.description
-            ? [
-                {
-                  type: "content",
-                  content: { type: "text", text: input.description },
-                },
-              ]
-            : [],
+        content:
+          !isAcpTerminal && supportsTerminalOutput
+            ? [{ type: "terminal" as const, terminalId: toolUse.id }]
+            : input && input.description
+              ? [
+                  {
+                    type: "content",
+                    content: { type: "text", text: input.description },
+                  },
+                ]
+              : [],
       };
     }
 
@@ -465,10 +513,12 @@ export function toolUpdateFromToolResult(
       }
       return {};
 
-    case "Bash": {
+    case "Bash":
+    case ACP_TERMINAL_TOOL_NAME: {
       const result = toolResult.content;
       const terminalId = "tool_use_id" in toolResult ? String(toolResult.tool_use_id) : "";
       const isError = "is_error" in toolResult && toolResult.is_error;
+      const isAcpTerminal = toolUse?.name === ACP_TERMINAL_TOOL_NAME;
 
       // Extract output and exit code from either format:
       // 1. BetaBashCodeExecutionResultBlock: { type: "bash_code_execution_result", stdout, stderr, return_code }
@@ -476,6 +526,7 @@ export function toolUpdateFromToolResult(
       // 3. Array content (e.g. [{ type: "text", text: "..." }])
       let output = "";
       let exitCode = isError ? 1 : 0;
+      let signal: string | null = null;
 
       if (
         result &&
@@ -497,23 +548,51 @@ export function toolUpdateFromToolResult(
         output = result.map((c: any) => c.text).join("\n");
       }
 
+      // ACP-routed bash encodes numeric exit info in a structured trailer
+      // (see ACP_TERMINAL_META_TAG). Parse it back, strip the trailer from
+      // the displayed output, and use the parsed values.
+      if (isAcpTerminal) {
+        const { cleaned, info } = parseAcpTerminalMeta(output);
+        output = cleaned;
+        if (info) {
+          exitCode = info.exitCode ?? (info.timedOut ? 124 : isError ? 1 : 0);
+          signal = info.signal;
+        }
+      }
+
       if (supportsTerminalOutput) {
-        return {
-          content: [{ type: "terminal" as const, terminalId }],
-          _meta: {
-            terminal_info: {
-              terminal_id: terminalId,
-            },
-            terminal_output: {
-              terminal_id: terminalId,
-              data: output,
-            },
-            terminal_exit: {
-              terminal_id: terminalId,
-              exit_code: exitCode,
-              signal: null,
-            },
+        // For ACP-routed bash the live output stream is already owned by the
+        // client's own terminal (created via `terminal/create`). Emitting a
+        // `terminal_output` data blob keyed to a different (SDK tool_use_id)
+        // terminal_id would just duplicate. We still emit a structured
+        // `terminal_exit` so clients that surface numeric exit info on the
+        // tool call card don't have to regex the text.
+        const meta: NonNullable<ToolUpdate["_meta"]> = {
+          terminal_exit: {
+            terminal_id: terminalId,
+            exit_code: exitCode,
+            signal,
           },
+        };
+        if (!isAcpTerminal) {
+          meta.terminal_info = { terminal_id: terminalId };
+          meta.terminal_output = { terminal_id: terminalId, data: output };
+        }
+        return {
+          content: isAcpTerminal
+            ? output.trim()
+              ? [
+                  {
+                    type: "content",
+                    content: {
+                      type: "text",
+                      text: `\`\`\`console\n${output.trimEnd()}\n\`\`\``,
+                    },
+                  },
+                ]
+              : []
+            : [{ type: "terminal" as const, terminalId }],
+          _meta: meta,
         };
       }
       // Fallback: format output as a code block without terminal _meta
