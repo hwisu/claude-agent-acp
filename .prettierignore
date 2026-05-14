@@ -1,6 +1,8 @@
 node_modules
 dist
 .agent-shell
+._*
+**/._*
 
 .release-please-manifest.json
 release-please-config.json

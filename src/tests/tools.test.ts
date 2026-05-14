@@ -667,6 +667,34 @@ describe("Bash terminal output", () => {
         });
       });
     });
+
+    it("should render structured MCP object results as JSON text", () => {
+      const update = toolUpdateFromToolResult(
+        {
+          type: "mcp_tool_result",
+          tool_use_id: "toolu_mcp_structured",
+          content: { result: "success", rows: [1, 2, 3] },
+          is_error: false,
+        } as any,
+        {
+          id: "toolu_mcp_structured",
+          name: "mcp__server__tool",
+          input: { query: "test" },
+        },
+      );
+
+      expect(update).toEqual({
+        content: [
+          {
+            type: "content",
+            content: {
+              type: "text",
+              text: JSON.stringify({ result: "success", rows: [1, 2, 3] }),
+            },
+          },
+        ],
+      });
+    });
   });
 
   describe("toAcpNotifications with clientCapabilities", () => {
@@ -1433,6 +1461,40 @@ describe("toolInfoFromToolUse - ExitPlanMode", () => {
 
     expect(info.kind).toBe("switch_mode");
     expect(info.content).toEqual([]);
+  });
+});
+
+describe("toolInfoFromToolUse - latest SDK tool schemas", () => {
+  it("includes Grep only-matching flag in the displayed command", () => {
+    const info = toolInfoFromToolUse({
+      name: "Grep",
+      id: "toolu_grep_o",
+      input: { pattern: "TODO\\(([^)]+)\\)", "-o": true, output_mode: "content" },
+    });
+
+    expect(info.title).toBe('grep -o "TODO\\(([^)]+)\\)"');
+  });
+
+  it("renders TaskCreate as a task card", () => {
+    const info = toolInfoFromToolUse({
+      name: "TaskCreate",
+      id: "toolu_task_create",
+      input: {
+        subject: "Run release checks",
+        description: "Build, lint, and run the focused test suite.",
+      },
+    });
+
+    expect(info).toEqual({
+      title: "Create task: Run release checks",
+      kind: "think",
+      content: [
+        {
+          type: "content",
+          content: { type: "text", text: "Build, lint, and run the focused test suite." },
+        },
+      ],
+    });
   });
 });
 

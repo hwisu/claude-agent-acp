@@ -16,6 +16,9 @@ import {
   FileWriteInput,
   GlobInput,
   GrepInput,
+  TaskCreateInput,
+  TaskGetInput,
+  TaskUpdateInput,
   TodoWriteInput,
   WebFetchInput,
   WebSearchInput,
@@ -339,6 +342,9 @@ export function toolInfoFromToolUse(
       if (input?.["-n"]) {
         label += " -n";
       }
+      if (input?.["-o"]) {
+        label += " -o";
+      }
 
       if (input?.["-A"] !== undefined) {
         label += ` -A ${input["-A"]}`;
@@ -437,6 +443,59 @@ export function toolInfoFromToolUse(
         title: Array.isArray(input?.todos)
           ? `Update TODOs: ${input.todos.map((todo: any) => todo.content).join(", ")}`
           : "Update TODOs",
+        kind: "think",
+        content: [],
+      };
+    }
+
+    case "TaskCreate": {
+      const input = toolUse.input as TaskCreateInput | undefined;
+      return {
+        title: input?.subject ? `Create task: ${input.subject}` : "Create task",
+        kind: "think",
+        content: input?.description
+          ? [
+              {
+                type: "content" as const,
+                content: { type: "text" as const, text: input.description },
+              },
+            ]
+          : [],
+      };
+    }
+
+    case "TaskGet": {
+      const input = toolUse.input as TaskGetInput | undefined;
+      return {
+        title: input?.taskId ? `Get task ${input.taskId}` : "Get task",
+        kind: "think",
+        content: [],
+      };
+    }
+
+    case "TaskUpdate": {
+      const input = toolUse.input as TaskUpdateInput | undefined;
+      const details = [
+        input?.subject ? `subject: ${input.subject}` : null,
+        input?.status ? `status: ${input.status}` : null,
+      ].filter(Boolean);
+      return {
+        title: input?.taskId ? `Update task ${input.taskId}` : "Update task",
+        kind: "think",
+        content: details.length
+          ? [
+              {
+                type: "content" as const,
+                content: { type: "text" as const, text: details.join("\n") },
+              },
+            ]
+          : [],
+      };
+    }
+
+    case "TaskList": {
+      return {
+        title: "List tasks",
         kind: "think",
         content: [],
       };
@@ -668,7 +727,7 @@ function toAcpContentUpdate(
         content: toAcpContentBlock(c, isError),
       })),
     };
-  } else if (typeof content === "object" && content !== null && "type" in content) {
+  } else if (typeof content === "object" && content !== null) {
     return {
       content: [
         {
@@ -693,67 +752,70 @@ function toAcpContentUpdate(
   return {};
 }
 
-function toAcpContentBlock(content: ToolResultContent, isError: boolean): ContentBlock {
+function toAcpContentBlock(
+  content: ToolResultContent | Record<string, unknown>,
+  isError: boolean,
+): ContentBlock {
   const wrapText = (text: string): ContentBlock => ({
     type: "text" as const,
     text: isError ? `\`\`\`\n${text}\n\`\`\`` : text,
   });
 
-  switch (content.type) {
+  const typed = content as ToolResultContent;
+
+  switch (typed.type) {
     case "text":
       return {
         type: "text" as const,
-        text: isError ? `\`\`\`\n${content.text}\n\`\`\`` : content.text,
+        text: isError ? `\`\`\`\n${typed.text}\n\`\`\`` : typed.text,
       };
     case "image":
-      if (content.source.type === "base64") {
+      if (typed.source.type === "base64") {
         return {
           type: "image" as const,
-          data: content.source.data,
-          mimeType: content.source.media_type,
+          data: typed.source.data,
+          mimeType: typed.source.media_type,
         };
       }
       // URL and file-based images can't be converted to ACP format (requires data)
       return wrapText(
-        content.source.type === "url"
-          ? `[image: ${content.source.url}]`
-          : "[image: file reference]",
+        typed.source.type === "url" ? `[image: ${typed.source.url}]` : "[image: file reference]",
       );
 
     case "tool_reference":
-      return wrapText(`Tool: ${content.tool_name}`);
+      return wrapText(`Tool: ${typed.tool_name}`);
     case "tool_search_tool_search_result":
       return wrapText(
-        `Tools found: ${content.tool_references.map((r) => r.tool_name).join(", ") || "none"}`,
+        `Tools found: ${typed.tool_references.map((r) => r.tool_name).join(", ") || "none"}`,
       );
     case "tool_search_tool_result_error":
       return wrapText(
-        `Error: ${content.error_code}${content.error_message ? ` - ${content.error_message}` : ""}`,
+        `Error: ${typed.error_code}${typed.error_message ? ` - ${typed.error_message}` : ""}`,
       );
     case "web_search_result":
-      return wrapText(`${content.title} (${content.url})`);
+      return wrapText(`${typed.title} (${typed.url})`);
     case "web_search_tool_result_error":
-      return wrapText(`Error: ${content.error_code}`);
+      return wrapText(`Error: ${typed.error_code}`);
     case "web_fetch_result":
-      return wrapText(`Fetched: ${content.url}`);
+      return wrapText(`Fetched: ${typed.url}`);
     case "web_fetch_tool_result_error":
-      return wrapText(`Error: ${content.error_code}`);
+      return wrapText(`Error: ${typed.error_code}`);
     case "code_execution_result":
-      return wrapText(`Output: ${content.stdout || content.stderr || ""}`);
+      return wrapText(`Output: ${typed.stdout || typed.stderr || ""}`);
     case "bash_code_execution_result":
-      return wrapText(`Output: ${content.stdout || content.stderr || ""}`);
+      return wrapText(`Output: ${typed.stdout || typed.stderr || ""}`);
     case "code_execution_tool_result_error":
     case "bash_code_execution_tool_result_error":
-      return wrapText(`Error: ${content.error_code}`);
+      return wrapText(`Error: ${typed.error_code}`);
     case "text_editor_code_execution_view_result":
-      return wrapText(content.content);
+      return wrapText(typed.content);
     case "text_editor_code_execution_create_result":
-      return wrapText(content.is_file_update ? "File updated" : "File created");
+      return wrapText(typed.is_file_update ? "File updated" : "File created");
     case "text_editor_code_execution_str_replace_result":
-      return wrapText(content.lines?.join("\n") || "");
+      return wrapText(typed.lines?.join("\n") || "");
     case "text_editor_code_execution_tool_result_error":
       return wrapText(
-        `Error: ${content.error_code}${content.error_message ? ` - ${content.error_message}` : ""}`,
+        `Error: ${typed.error_code}${typed.error_message ? ` - ${typed.error_message}` : ""}`,
       );
 
     default:

@@ -315,6 +315,12 @@ export type ToolUpdateMeta = {
     toolName: string;
     /* The structured output provided by Claude Code. */
     toolResponse?: unknown;
+    /* Permission denial metadata emitted by the Claude Agent SDK. */
+    permissionDenied?: {
+      message: string;
+      decisionReasonType?: string;
+      decisionReason?: string;
+    };
   };
   /* Terminal metadata for Bash tool execution, matching codex-acp's _meta protocol. */
   terminal_info?: {
@@ -900,6 +906,41 @@ export class ClaudeAcpAgent implements Agent {
                   update: {
                     sessionUpdate: "agent_message_chunk",
                     content: { type: "text", text: message.content },
+                  },
+                });
+                break;
+              }
+              case "permission_denied": {
+                const denialText = [
+                  message.message,
+                  message.decision_reason ? `Reason: ${message.decision_reason}` : null,
+                ]
+                  .filter(Boolean)
+                  .join("\n");
+                await this.client.sessionUpdate({
+                  sessionId: message.session_id,
+                  update: {
+                    _meta: {
+                      claudeCode: {
+                        toolName: message.tool_name,
+                        permissionDenied: {
+                          message: message.message,
+                          decisionReasonType: message.decision_reason_type,
+                          decisionReason: message.decision_reason,
+                        },
+                      },
+                    } satisfies ToolUpdateMeta,
+                    toolCallId: message.tool_use_id,
+                    sessionUpdate: "tool_call_update",
+                    title: `Permission denied: ${message.tool_name}`,
+                    status: "failed",
+                    rawOutput: message.message,
+                    content: [
+                      {
+                        type: "content",
+                        content: { type: "text", text: denialText },
+                      },
+                    ],
                   },
                 });
                 break;
@@ -1524,7 +1565,11 @@ export class ClaudeAcpAgent implements Agent {
     suggestions: Parameters<CanUseTool>[2]["suggestions"],
     supportsTerminalOutput: boolean,
   ): Promise<PermissionResult> {
-    const optionsAll = [
+    type PermissionRequestOption = Parameters<
+      AgentSideConnection["requestPermission"]
+    >[0]["options"][number];
+
+    const optionsAll: PermissionRequestOption[] = [
       { kind: "allow_always", name: 'Yes, and use "auto" mode', optionId: "auto" },
       {
         kind: "allow_always",

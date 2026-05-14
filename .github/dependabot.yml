@@ -12,7 +12,7 @@ updates:
     allow:
       - dependency-type: "all"
     ignore:
-      # Pinned to match the peer range of @anthropic-ai/claude-agent-sdk;
+      # Pinned to match the @anthropic-ai/sdk range used by @anthropic-ai/claude-agent-sdk;
       # newer minors break type compatibility between the two installed copies.
       - dependency-name: "@anthropic-ai/sdk"
         update-types:

@@ -639,6 +639,7 @@ describe("tool conversions", () => {
           },
         ],
         stop_reason: null,
+        stop_details: null,
         stop_sequence: null,
         usage: {
           input_tokens: 6,
@@ -2172,6 +2173,50 @@ describe("usage_update computation", () => {
       pendingAcpTerminalToolUses: [],
     };
   }
+
+  it("surfaces SDK permission_denied system messages as failed tool updates", async () => {
+    const { agent, updates } = createMockAgentWithCapture();
+    injectSession(agent, [
+      {
+        type: "system",
+        subtype: "permission_denied",
+        tool_name: "Bash",
+        tool_use_id: "toolu_denied",
+        decision_reason_type: "mode",
+        decision_reason: "dontAsk denied this tool call",
+        message: "Permission denied",
+        uuid: randomUUID(),
+        session_id: "test-session",
+      },
+      createResultMessageWithModel({ modelUsage: {} }),
+      { type: "system", subtype: "session_state_changed", state: "idle" },
+    ]);
+
+    await agent.prompt({
+      sessionId: "test-session",
+      prompt: [{ type: "text", text: "run command" }],
+    });
+
+    expect(updates).toContainEqual({
+      sessionId: "test-session",
+      update: expect.objectContaining({
+        sessionUpdate: "tool_call_update",
+        toolCallId: "toolu_denied",
+        title: "Permission denied: Bash",
+        status: "failed",
+        rawOutput: "Permission denied",
+        content: [
+          {
+            type: "content",
+            content: {
+              type: "text",
+              text: "Permission denied\nReason: dontAsk denied this tool call",
+            },
+          },
+        ],
+      }),
+    });
+  });
 
   it("used sums all token types as post-turn context occupancy proxy", async () => {
     const { agent, updates } = createMockAgentWithCapture();
