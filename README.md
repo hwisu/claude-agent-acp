@@ -39,16 +39,16 @@ This fork's version mirrors the underlying `@anthropic-ai/claude-agent-sdk` vers
 
 | package version | meaning                                                 |
 | --------------- | ------------------------------------------------------- |
-| `0.2.141`       | wraps Claude Agent SDK `0.2.141`, no fork-only patches  |
-| `0.2.141-1`     | wraps SDK `0.2.141`, first fork-only patch on top of it |
-| `0.2.141-2`     | wraps SDK `0.2.141`, second fork-only patch             |
-| `0.2.142`       | wraps SDK `0.2.142` (suffix resets on every SDK bump)   |
+| `0.3.157`       | wraps Claude Agent SDK `0.3.157`, no fork-only patches  |
+| `0.3.157-1`     | wraps SDK `0.3.157`, first fork-only patch on top of it |
+| `0.3.157-2`     | wraps SDK `0.3.157`, second fork-only patch             |
+| `0.3.158`       | wraps SDK `0.3.158` (suffix resets on every SDK bump)   |
 
 Two helper scripts enforce this:
 
 ```bash
 aube install                          # install/refresh the SDK at its pinned version
-aube run sync-sdk-version             # set package.version := SDK base (e.g. 0.2.141)
+aube run sync-sdk-version             # set package.version := SDK base (e.g. 0.3.157)
 aube run sync-sdk-version -- --bump   # bump the -N suffix for a fork-only patch
 aube run sync-sdk-version -- --check  # CI guard: fail if version drifts from SDK
 ```

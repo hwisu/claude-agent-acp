@@ -965,6 +965,7 @@ export class ClaudeAcpAgent implements Agent {
               case "notification":
               case "api_retry":
               case "mirror_error":
+              case "thinking_tokens":
                 // Todo: process via status api: https://docs.claude.com/en/docs/claude-code/hooks#hook-output
                 break;
               default:
@@ -1240,6 +1241,10 @@ export class ClaudeAcpAgent implements Agent {
               message.message.content[0].text.includes("Please run /login")
             ) {
               throw RequestError.authRequired();
+            }
+
+            if (message.message.role === "system") {
+              break;
             }
 
             const content =
@@ -2168,6 +2173,11 @@ export class ClaudeAcpAgent implements Agent {
               ? Object.fromEntries(server.headers.map((e) => [e.name, e.value]))
               : undefined,
           };
+        } else if ("type" in server && server.type === "acp") {
+          throw RequestError.invalidParams(
+            { mcpServer: server.name, type: server.type },
+            "ACP MCP transport is not supported by this agent",
+          );
         } else {
           // Stdio type MCP server (with or without explicit type field)
           mcpServers[server.name] = {
@@ -3251,6 +3261,7 @@ export function toAcpNotifications(
       case "compaction":
       case "compaction_delta":
       case "advisor_tool_result":
+      case "mid_conv_system":
         break;
 
       default:
