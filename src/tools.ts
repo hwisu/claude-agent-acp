@@ -919,6 +919,13 @@ const toolUseCallbacks: {
   };
 } = {};
 
+/** Clear all pending tool-use callbacks. Call after each prompt to prevent memory leaks. */
+export function clearToolUseCallbacks(): void {
+  for (const key of Object.keys(toolUseCallbacks)) {
+    delete toolUseCallbacks[key];
+  }
+}
+
 /* Setup callbacks that will be called when receiving hooks from Claude Code */
 export const registerHookCallback = (
   toolUseID: string,

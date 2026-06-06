@@ -77,6 +77,7 @@ import {
   ACP_TERMINAL_TOOL_NAME,
   ClaudePlanEntry,
   createPostToolUseHook,
+  clearToolUseCallbacks,
   formatAcpTerminalMeta,
   planEntries,
   registerHookCallback,
@@ -1313,6 +1314,7 @@ export class ClaudeAcpAgent implements Agent {
     } finally {
       if (!handedOff) {
         this.toolUseCache = {};
+        clearToolUseCallbacks();
         session.promptRunning = false;
         // This usually should not happen, but in case the loop finishes
         // without claude sending all message replays, we resolve the
@@ -3060,13 +3062,10 @@ export function toAcpNotifications(
     };
 
     if (options?.parentToolUseId) {
-      update._meta = {
-        ...update._meta,
-        claudeCode: {
-          ...(update._meta?.claudeCode || {}),
-          parentToolUseId: options.parentToolUseId,
-        },
-      };
+      update._meta ??= {};
+      update._meta.claudeCode ??= {} as Record<string, unknown>;
+      (update._meta.claudeCode as Record<string, unknown>).parentToolUseId =
+        options.parentToolUseId;
     }
 
     return [{ sessionId, update }];
@@ -3296,13 +3295,10 @@ export function toAcpNotifications(
     }
     if (update) {
       if (options?.parentToolUseId) {
-        update._meta = {
-          ...update._meta,
-          claudeCode: {
-            ...(update._meta?.claudeCode || {}),
-            parentToolUseId: options.parentToolUseId,
-          },
-        };
+        update._meta ??= {};
+        update._meta.claudeCode ??= {} as Record<string, unknown>;
+        (update._meta.claudeCode as Record<string, unknown>).parentToolUseId =
+          options.parentToolUseId;
       }
       output.push({ sessionId, update });
     }
