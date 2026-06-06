@@ -190,15 +190,13 @@ describe("ClaudeAcpAgent settings", () => {
     const { ClaudeAcpAgent } = await import("../acp-agent.js");
     const agent: ClaudeAcpAgentType = new ClaudeAcpAgent(createMockClient());
 
-    const response = await (agent as any).createSession({
+    // Bad model is ignored at the usage site; falls back to the first SDK model.
+    await (agent as any).createSession({
       cwd: projectDir,
       mcpServers: [],
       _meta: { disableBuiltInTools: true },
     });
-
-    // Bad model is ignored at the usage site; falls back to the first SDK model.
     expect(setModelSpy).toHaveBeenCalledWith("claude-sonnet-4-6");
-    expect(response.models.currentModelId).toBe("claude-sonnet-4-6");
   });
 
   describe("auto mode availability per model", () => {
@@ -544,14 +542,13 @@ describe("ClaudeAcpAgent settings", () => {
       const { ClaudeAcpAgent } = await import("../acp-agent.js");
       const agent: ClaudeAcpAgentType = new ClaudeAcpAgent(createMockClient());
 
-      const response = await (agent as any).createSession({
+      await (agent as any).createSession({
         cwd: projectDir,
         mcpServers: [],
         _meta: { disableBuiltInTools: true },
       });
 
       expect(setModelSpy).toHaveBeenCalledWith("claude-haiku-4-5");
-      expect(response.models.currentModelId).toBe("claude-haiku-4-5");
     });
   });
 
@@ -591,13 +588,12 @@ describe("ClaudeAcpAgent settings", () => {
     const { ClaudeAcpAgent } = await import("../acp-agent.js");
     const agent: ClaudeAcpAgentType = new ClaudeAcpAgent(createMockClient());
 
-    const response = await (agent as any).createSession({
+    await (agent as any).createSession({
       cwd: projectDir,
       mcpServers: [],
       _meta: { disableBuiltInTools: true },
     });
 
     expect(setModelSpy).toHaveBeenCalledWith("claude-opus-4-6-1m");
-    expect(response.models.currentModelId).toBe("claude-opus-4-6-1m");
   });
 });

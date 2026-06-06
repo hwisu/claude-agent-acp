@@ -27,13 +27,10 @@ import {
   ResumeSessionRequest,
   ResumeSessionResponse,
   SessionConfigOption,
-  SessionModelState,
   SessionModeState,
   SessionNotification,
   SetSessionConfigOptionRequest,
   SetSessionConfigOptionResponse,
-  SetSessionModelRequest,
-  SetSessionModelResponse,
   SetSessionModeRequest,
   SetSessionModeResponse,
   CloseSessionRequest,
@@ -89,10 +86,18 @@ import {
 } from "./tools.js";
 import { Logger, nodeToWebReadable, nodeToWebWritable, Pushable, unreachable } from "./utils.js";
 
+/** Internal model state tracking (SessionModelState was removed from ACP SDK 0.25). */
+interface ModelState {
+  availableModels: Array<{ modelId: string; name: string; description?: string | null }>;
+  currentModelId: string;
+}
+
 export const CLAUDE_CONFIG_DIR =
   process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude");
 
 const MAX_TITLE_LENGTH = 256;
+
+const STREAMED_TYPES = new Set(["text", "thinking"]);
 
 // Substring patterns the SDK uses when its CLI subprocess dies. The SDK
 // doesn't surface a typed error, so we match on the message until it does.
@@ -169,7 +174,7 @@ type Session = {
   settingsManager: SettingsManager;
   accumulatedUsage: AccumulatedUsage;
   modes: SessionModeState;
-  models: SessionModelState;
+  models: ModelState;
   modelInfos: ModelInfo[];
   configOptions: SessionConfigOption[];
   promptRunning: boolean;
@@ -204,7 +209,9 @@ function computeSessionFingerprint(params: {
   return JSON.stringify({ cwd: params.cwd, mcpServers: servers });
 }
 
-type BackgroundTerminal =
+type BackgroundTerminal = {
+  sessionId: string;
+} & (
   | {
       handle: TerminalHandle;
       status: "started";
@@ -213,7 +220,8 @@ type BackgroundTerminal =
   | {
       status: "aborted" | "exited" | "killed" | "timedOut";
       pendingOutput: TerminalOutputResponse;
-    };
+    }
+);
 
 /**
  * Pure-data shape describing how an ACP-routed shell command terminated.
@@ -951,6 +959,7 @@ export class ClaudeAcpAgent implements Agent {
                 }
                 break;
               }
+              case "commands_changed":
               case "hook_started":
               case "hook_progress":
               case "hook_response":
@@ -1135,7 +1144,10 @@ export class ClaudeAcpAgent implements Agent {
               }
 
               const nextUsage = totalTokens(lastAssistantUsage);
-              if (nextUsage !== lastAssistantTotalUsage) {
+              if (
+                lastAssistantTotalUsage === null ||
+                Math.abs(nextUsage - lastAssistantTotalUsage) >= 50
+              ) {
                 lastAssistantTotalUsage = nextUsage;
                 await this.client.sessionUpdate({
                   sessionId: params.sessionId,
@@ -1250,9 +1262,7 @@ export class ClaudeAcpAgent implements Agent {
             const content =
               message.type === "assistant"
                 ? // Handled by stream events above
-                  message.message.content.filter(
-                    (item) => !["text", "thinking"].includes(item.type),
-                  )
+                  message.message.content.filter((item) => !STREAMED_TYPES.has(item.type))
                 : message.message.content;
 
             for (const notification of toAcpNotifications(
@@ -1302,6 +1312,7 @@ export class ClaudeAcpAgent implements Agent {
       throw error;
     } finally {
       if (!handedOff) {
+        this.toolUseCache = {};
         session.promptRunning = false;
         // This usually should not happen, but in case the loop finishes
         // without claude sending all message replays, we resolve the
@@ -1343,6 +1354,14 @@ export class ClaudeAcpAgent implements Agent {
     session.settingsManager.dispose();
     session.abortController.abort();
     session.query.close();
+    for (const [id, bg] of Object.entries(this.backgroundTerminals)) {
+      if (bg.sessionId === sessionId) {
+        if ("handle" in bg) {
+          releaseTerminalSafely(bg.handle, this.logger);
+        }
+        delete this.backgroundTerminals[id];
+      }
+    }
     delete this.sessions[sessionId];
   }
 
@@ -1367,9 +1386,11 @@ export class ClaudeAcpAgent implements Agent {
     return {};
   }
 
-  async unstable_setSessionModel(
-    params: SetSessionModelRequest,
-  ): Promise<SetSessionModelResponse | void> {
+  async unstable_setSessionModel(params: {
+    sessionId: string;
+    modelId: string;
+    _meta?: Record<string, unknown> | null;
+  }): Promise<void> {
     const session = this.sessions[params.sessionId];
     if (!session) {
       throw new Error("Session not found");
@@ -1832,6 +1853,7 @@ export class ClaudeAcpAgent implements Agent {
               // Park the handle; the model polls via `output` and cleans up
               // via `kill` / `release`. We deliberately don't release here.
               backgroundTerminals[handle.id] = {
+                sessionId,
                 handle,
                 status: "started",
                 lastOutput: null,
@@ -1893,6 +1915,7 @@ export class ClaudeAcpAgent implements Agent {
               const out = await bg.handle.currentOutput();
               if (out.exitStatus) {
                 backgroundTerminals[terminal_id] = {
+                  sessionId: bg.sessionId,
                   status: "exited",
                   pendingOutput: out,
                 };
@@ -1947,6 +1970,7 @@ export class ClaudeAcpAgent implements Agent {
             await bg.handle.kill().catch((err) => logger.error?.("ACP terminal kill failed:", err));
             const out = await bg.handle.currentOutput();
             backgroundTerminals[terminal_id] = {
+              sessionId: bg.sessionId,
               status: "killed",
               pendingOutput: out,
             };
@@ -1967,7 +1991,7 @@ export class ClaudeAcpAgent implements Agent {
   private async sendAvailableCommandsUpdate(sessionId: string): Promise<void> {
     const session = this.sessions[sessionId];
     if (!session) return;
-    const commands = await session.query.supportedCommands();
+    const commands = (await session.query.supportedCommands()) ?? [];
     await this.client.sessionUpdate({
       sessionId,
       update: {
@@ -2109,7 +2133,6 @@ export class ClaudeAcpAgent implements Agent {
         return {
           sessionId: params.sessionId,
           modes: existingSession.modes,
-          models: existingSession.models,
           configOptions: existingSession.configOptions,
         };
       }
@@ -2134,7 +2157,6 @@ export class ClaudeAcpAgent implements Agent {
     return {
       sessionId: response.sessionId,
       modes: response.modes,
-      models: response.models,
       configOptions: response.configOptions,
     };
   }
@@ -2469,7 +2491,6 @@ export class ClaudeAcpAgent implements Agent {
 
     return {
       sessionId,
-      models,
       modes,
       configOptions,
     };
@@ -2622,7 +2643,7 @@ function buildAvailableModes(modelInfo: ModelInfo | undefined): SessionModeState
 
 function buildConfigOptions(
   modes: SessionModeState,
-  models: SessionModelState,
+  models: ModelState,
   modelInfos: ModelInfo[],
   currentEffortLevel?: string,
 ): SessionConfigOption[] {
@@ -2734,35 +2755,36 @@ function resolveModelPreference(models: ModelInfo[], preference: string): ModelI
   if (!trimmed) return null;
 
   const lower = trimmed.toLowerCase();
+  const { tokens, contextHint } = tokenizeModelPreference(trimmed);
 
-  // Exact match on value or display name
-  const directMatch = models.find(
-    (model) =>
-      model.value === trimmed ||
-      model.value.toLowerCase() === lower ||
-      model.displayName.toLowerCase() === lower,
-  );
-  if (directMatch) return directMatch;
-
-  // Substring match
-  const includesMatch = models.find((model) => {
+  // Single-pass: check exact (priority 3), substring (2), tokenized (1)
+  let bestMatch: ModelInfo | null = null;
+  let bestScore = -1; // -1 = not found, 0+ = token score, 2 = substring, 3 = exact
+  for (const model of models) {
+    if (bestScore >= 3) break; // exact match is highest priority, no need to continue
     const value = model.value.toLowerCase();
     const display = model.displayName.toLowerCase();
-    return value.includes(lower) || display.includes(lower) || lower.includes(value);
-  });
-  if (includesMatch) return includesMatch;
-
-  // Tokenized matching for aliases like "opus[1m]"
-  const { tokens, contextHint } = tokenizeModelPreference(trimmed);
-  if (tokens.length === 0) return null;
-
-  let bestMatch: ModelInfo | null = null;
-  let bestScore = 0;
-  for (const model of models) {
-    const score = scoreModelMatch(model, tokens, contextHint);
-    if (0 < score && (!bestMatch || bestScore < score)) {
+    // Exact match (priority 3)
+    if (model.value === trimmed || value === lower || display === lower) {
+      return model;
+    }
+    // Substring match (priority 2)
+    if (
+      bestScore < 2 &&
+      (value.includes(lower) || display.includes(lower) || lower.includes(value))
+    ) {
       bestMatch = model;
-      bestScore = score;
+      bestScore = 2;
+      continue;
+    }
+    // Tokenized match (priority 1) — check even if another model scored,
+    // since a later model may have a higher token score.
+    if (tokens.length > 0) {
+      const score = scoreModelMatch(model, tokens, contextHint);
+      if (0 < score && (!bestMatch || bestScore < score)) {
+        bestMatch = model;
+        bestScore = score;
+      }
     }
   }
 
@@ -2836,7 +2858,7 @@ async function getAvailableModels(
   models: ModelInfo[],
   settingsManager: SettingsManager,
   logger: Logger,
-): Promise<SessionModelState> {
+): Promise<ModelState> {
   const settings = settingsManager.getSettings();
 
   let currentModel = models[0];
@@ -2870,7 +2892,7 @@ async function getAvailableModels(
 }
 
 function getAvailableSlashCommands(commands: SlashCommand[]): AvailableCommand[] {
-  const UNSUPPORTED_COMMANDS = [
+  const UNSUPPORTED_COMMANDS = new Set([
     "cost",
     "keybindings-help",
     "login",
@@ -2878,28 +2900,25 @@ function getAvailableSlashCommands(commands: SlashCommand[]): AvailableCommand[]
     "output-style:new",
     "release-notes",
     "todos",
-  ];
+  ]);
 
-  return commands
-    .map((command) => {
-      const input = command.argumentHint
-        ? {
-            hint: Array.isArray(command.argumentHint)
-              ? command.argumentHint.join(" ")
-              : command.argumentHint,
-          }
-        : null;
-      let name = command.name;
-      if (command.name.endsWith(" (MCP)")) {
-        name = `mcp:${name.replace(" (MCP)", "")}`;
-      }
-      return {
-        name,
-        description: command.description || "",
-        input,
-      };
-    })
-    .filter((command: AvailableCommand) => !UNSUPPORTED_COMMANDS.includes(command.name));
+  return commands.flatMap((command) => {
+    let name = command.name;
+    if (name.endsWith(" (MCP)")) {
+      name = `mcp:${name.replace(" (MCP)", "")}`;
+    }
+    if (UNSUPPORTED_COMMANDS.has(name)) {
+      return [];
+    }
+    const input = command.argumentHint
+      ? {
+          hint: Array.isArray(command.argumentHint)
+            ? command.argumentHint.join(" ")
+            : command.argumentHint,
+        }
+      : null;
+    return [{ name, description: command.description || "", input }];
+  });
 }
 
 function formatUriAsLink(uri: string): string {
@@ -3145,11 +3164,18 @@ export function toAcpNotifications(
             });
           }
 
-          let rawInput;
-          try {
-            rawInput = JSON.parse(JSON.stringify(chunk.input));
-          } catch {
-            // ignore if we can't turn it to JSON
+          const rawInput = alreadyCached
+            ? (toolUseCache[chunk.id] as any)?._acpRawInput
+            : (() => {
+                try {
+                  return structuredClone(chunk.input);
+                } catch {
+                  return undefined;
+                }
+              })();
+
+          if (!alreadyCached) {
+            (chunk as any)._acpRawInput = rawInput;
           }
 
           if (alreadyCached) {

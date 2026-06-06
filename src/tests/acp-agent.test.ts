@@ -369,32 +369,6 @@ describe("tool conversions", () => {
     });
   });
 
-  it("should handle Write tool calls", () => {
-    const tool_use = {
-      type: "tool_use",
-      id: "toolu_01GHI789JKL456",
-      name: "Write",
-      input: {
-        file_path: "/Users/test/project/config.json",
-        content: '{"version": "1.0.0"}',
-      },
-    };
-
-    expect(toolInfoFromToolUse(tool_use)).toStrictEqual({
-      kind: "edit",
-      title: "Write /Users/test/project/config.json",
-      content: [
-        {
-          type: "diff",
-          path: "/Users/test/project/config.json",
-          oldText: null,
-          newText: '{"version": "1.0.0"}',
-        },
-      ],
-      locations: [{ path: "/Users/test/project/config.json" }],
-    });
-  });
-
   it("should handle Edit tool calls", () => {
     const tool_use = {
       type: "tool_use",
@@ -485,24 +459,6 @@ describe("tool conversions", () => {
       title: "Read /Users/test/project/readme.md",
       content: [],
       locations: [{ path: "/Users/test/project/readme.md", line: 1 }],
-    });
-  });
-
-  it("should handle Read tool calls", () => {
-    const tool_use = {
-      type: "tool_use",
-      id: "toolu_01YZA789BCD123",
-      name: "Read",
-      input: {
-        file_path: "/Users/test/project/data.json",
-      },
-    };
-
-    expect(toolInfoFromToolUse(tool_use)).toStrictEqual({
-      kind: "read",
-      title: "Read /Users/test/project/data.json",
-      content: [],
-      locations: [{ path: "/Users/test/project/data.json", line: 1 }],
     });
   });
 

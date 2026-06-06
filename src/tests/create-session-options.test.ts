@@ -364,42 +364,33 @@ describe("createSession options merging", () => {
       }
     });
 
-    it("passes modelOverrides as settings", async () => {
-      process.env.CLAUDE_MODEL_CONFIG = JSON.stringify({
-        modelOverrides: { "claude-opus-4-6": "us.anthropic.claude-opus-4-6-v1" },
-      });
+    it("passes env var values as settings", async () => {
+      const testCases = [
+        {
+          config: { modelOverrides: { "claude-opus-4-6": "us.anthropic.claude-opus-4-6-v1" } },
+          expected: { modelOverrides: { "claude-opus-4-6": "us.anthropic.claude-opus-4-6-v1" } },
+        },
+        {
+          config: { availableModels: ["opus", "sonnet"] },
+          expected: { availableModels: ["opus", "sonnet"] },
+        },
+        {
+          config: {
+            modelOverrides: { "claude-opus-4-6": "us.anthropic.claude-opus-4-6-v1" },
+            availableModels: ["opus"],
+          },
+          expected: {
+            modelOverrides: { "claude-opus-4-6": "us.anthropic.claude-opus-4-6-v1" },
+            availableModels: ["opus"],
+          },
+        },
+      ];
 
-      await agent.newSession({ cwd: "/test", mcpServers: [] });
-
-      expect(capturedOptions!.settings).toEqual({
-        modelOverrides: { "claude-opus-4-6": "us.anthropic.claude-opus-4-6-v1" },
-      });
-    });
-
-    it("passes availableModels as settings", async () => {
-      process.env.CLAUDE_MODEL_CONFIG = JSON.stringify({
-        availableModels: ["opus", "sonnet"],
-      });
-
-      await agent.newSession({ cwd: "/test", mcpServers: [] });
-
-      expect(capturedOptions!.settings).toEqual({
-        availableModels: ["opus", "sonnet"],
-      });
-    });
-
-    it("passes both modelOverrides and availableModels", async () => {
-      process.env.CLAUDE_MODEL_CONFIG = JSON.stringify({
-        modelOverrides: { "claude-opus-4-6": "us.anthropic.claude-opus-4-6-v1" },
-        availableModels: ["opus"],
-      });
-
-      await agent.newSession({ cwd: "/test", mcpServers: [] });
-
-      expect(capturedOptions!.settings).toEqual({
-        modelOverrides: { "claude-opus-4-6": "us.anthropic.claude-opus-4-6-v1" },
-        availableModels: ["opus"],
-      });
+      for (const { config, expected } of testCases) {
+        process.env.CLAUDE_MODEL_CONFIG = JSON.stringify(config);
+        await agent.newSession({ cwd: "/test", mcpServers: [] });
+        expect(capturedOptions!.settings).toEqual(expected);
+      }
     });
 
     it("does not add settings when env var is not set", async () => {

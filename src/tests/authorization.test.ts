@@ -20,15 +20,9 @@ vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
 }));
 
 describe("authorization", () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
-  });
+  beforeEach(() => {});
 
   afterEach(() => {
-    //await all pending events like
-    vi.runAllTimers();
-    vi.useRealTimers();
-
     vi.unstubAllGlobals();
     vi.resetAllMocks();
   });

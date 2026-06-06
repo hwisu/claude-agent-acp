@@ -21,10 +21,10 @@ import {
   planEntries,
 } from "../tools.js";
 
-describe("rawOutput in tool call updates", () => {
-  const mockClient = {} as AgentSideConnection;
-  const mockLogger: Logger = { log: () => {}, error: () => {} };
+const mockClient = {} as AgentSideConnection;
+const mockLogger: Logger = { log: () => {}, error: () => {} };
 
+describe("rawOutput in tool call updates", () => {
   it("should include rawOutput with string content for tool_result", () => {
     const toolUseCache: ToolUseCache = {
       toolu_123: {
@@ -422,9 +422,6 @@ describe("rawOutput in tool call updates", () => {
 });
 
 describe("Bash terminal output", () => {
-  const mockClient = {} as AgentSideConnection;
-  const mockLogger: Logger = { log: () => {}, error: () => {} };
-
   const bashToolUse = {
     type: "tool_use",
     id: "toolu_bash",
@@ -1499,37 +1496,23 @@ describe("toolInfoFromToolUse - latest SDK tool schemas", () => {
 });
 
 describe("toolInfoFromToolUse - undefined input regression", () => {
-  it("Read with undefined input should not throw", () => {
-    const toolUse = { name: "Read", id: "toolu_read_undef", input: undefined };
-    const info = toolInfoFromToolUse(toolUse, false);
-    expect(info.title).toBe("Read File");
-    expect(info.locations).toEqual([]);
-  });
-
-  it("Grep with undefined input should not throw", () => {
-    const toolUse = { name: "Grep", id: "toolu_grep_undef", input: undefined };
-    const info = toolInfoFromToolUse(toolUse, false);
-    expect(info.title).toBe("grep");
-  });
-
-  it("Glob with undefined input should not throw", () => {
-    const toolUse = { name: "Glob", id: "toolu_glob_undef", input: undefined };
-    const info = toolInfoFromToolUse(toolUse, false);
-    expect(info.title).toBe("Find");
-    expect(info.locations).toEqual([]);
-  });
-
-  it("WebSearch with undefined input should not throw", () => {
-    const toolUse = { name: "WebSearch", id: "toolu_ws_undef", input: undefined };
-    const info = toolInfoFromToolUse(toolUse, false);
-    expect(info.title).toBe("Web search");
-  });
-
-  it("TodoWrite with undefined input should not throw", () => {
-    const toolUse = { name: "TodoWrite", id: "toolu_todo_undef", input: undefined };
-    const info = toolInfoFromToolUse(toolUse, false);
-    expect(info.title).toBe("Update TODOs");
-  });
+  it.each([
+    { name: "Read", id: "toolu_read_undef", expectedTitle: "Read File", expectedLocations: [] },
+    { name: "Grep", id: "toolu_grep_undef", expectedTitle: "grep" },
+    { name: "Glob", id: "toolu_glob_undef", expectedTitle: "Find", expectedLocations: [] },
+    { name: "WebSearch", id: "toolu_ws_undef", expectedTitle: "Web search" },
+    { name: "TodoWrite", id: "toolu_todo_undef", expectedTitle: "Update TODOs" },
+  ])(
+    "$name with undefined input should not throw",
+    ({ name, id, expectedTitle, expectedLocations }) => {
+      const toolUse = { name, id, input: undefined };
+      const info = toolInfoFromToolUse(toolUse, false);
+      expect(info.title).toBe(expectedTitle);
+      if (expectedLocations !== undefined) {
+        expect(info.locations).toEqual(expectedLocations);
+      }
+    },
+  );
 });
 
 describe("planEntries - undefined input regression", () => {
@@ -1556,9 +1539,6 @@ describe("planEntries - undefined input regression", () => {
 });
 
 describe("toAcpNotifications - TodoWrite with undefined input regression", () => {
-  const mockClient = {} as AgentSideConnection;
-  const mockLogger: Logger = { log: () => {}, error: () => {} };
-
   it("should not throw when TodoWrite tool_use has undefined input", () => {
     const toolUseCache: ToolUseCache = {};
 

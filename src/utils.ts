@@ -75,13 +75,22 @@ export function nodeToWebWritable(nodeStream: Writable): WritableStream<Uint8Arr
 }
 
 export function nodeToWebReadable(nodeStream: Readable): ReadableStream<Uint8Array> {
+  let onData: (chunk: Buffer) => void;
+  let onEnd: () => void;
+  let onError: (err: Error) => void;
   return new ReadableStream<Uint8Array>({
     start(controller) {
-      nodeStream.on("data", (chunk: Buffer) => {
-        controller.enqueue(new Uint8Array(chunk));
-      });
-      nodeStream.on("end", () => controller.close());
-      nodeStream.on("error", (err) => controller.error(err));
+      onData = (chunk: Buffer) => controller.enqueue(new Uint8Array(chunk));
+      onEnd = () => controller.close();
+      onError = (err) => controller.error(err);
+      nodeStream.on("data", onData);
+      nodeStream.on("end", onEnd);
+      nodeStream.on("error", onError);
+    },
+    cancel() {
+      nodeStream.removeListener("data", onData);
+      nodeStream.removeListener("end", onEnd);
+      nodeStream.removeListener("error", onError);
     },
   });
 }
