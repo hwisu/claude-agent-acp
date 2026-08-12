@@ -48,7 +48,7 @@ export default [
       "default-case": "error",
       "prefer-const": "error",
       "no-var": "error",
-      eqeqeq: ["error", "always"],
+      eqeqeq: ["error", "smart"],
       curly: ["error", "all"],
     },
   },

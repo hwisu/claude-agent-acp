@@ -98,6 +98,22 @@ aube run check && aube run build   # lint+format check, then tsc
 aube run test:run                  # vitest --run
 ```
 
+- **Nested subagent transcripts** — clients can opt in with
+  `clientCapabilities._meta["subagent-transcript"] = true`.
+- **Provider-neutral goals** — session-scoped long-running goals are exposed
+  through the [goal extension](docs/goal-extension.md).
+
+### Nested subagent transcripts
+
+ACP 1.2 has no standard subagent tool kind or nested-message relationship. Clients that can render
+nested transcripts can opt in with `clientCapabilities._meta["subagent-transcript"] = true`.
+The agent then forwards subagent text, thinking, and tool calls, relating nested updates to the
+launching Agent/Task call through `_meta.claudeCode.parentToolUseId`. Agent/Task calls are marked
+with `_meta.claudeCode.subagent = true`.
+
+Clients that do not advertise the capability retain the legacy flattened behavior. In both modes,
+the normal Agent/Task tool result is preserved as the protocol-compatible fallback.
+
 ## Contribution Policy
 
 This project does not require a Contributor License Agreement (CLA). Instead, contributions are accepted under the following terms:

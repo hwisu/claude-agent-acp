@@ -1,18 +1,20 @@
 import { describe, it, expect } from "vitest";
 import { randomUUID } from "crypto";
-import { AgentSideConnection, RequestError, SessionNotification } from "@agentclientprotocol/sdk";
+import { RequestError, SessionNotification } from "@agentclientprotocol/sdk";
 import { query, getSessionMessages } from "@anthropic-ai/claude-agent-sdk";
-import { ClaudeAcpAgent } from "../acp-agent.js";
+import { AcpClient, ClaudeAcpAgent } from "../acp-agent.js";
 import { Pushable } from "../utils.js";
 import type { SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 
-function createMockClient(): AgentSideConnection {
+function createMockClient(
+  sessionUpdate: (notification: SessionNotification) => Promise<void> = async () => {},
+): AcpClient {
   return {
-    sessionUpdate: async (_notification: SessionNotification) => {},
+    sessionUpdate,
     requestPermission: async () => ({ outcome: { outcome: "cancelled" } }),
     readTextFile: async () => ({ content: "" }),
     writeTextFile: async () => ({}),
-  } as unknown as AgentSideConnection;
+  } as unknown as AcpClient;
 }
 
 describe.skipIf(!process.env.RUN_INTEGRATION_TESTS)("session load/resume lifecycle", () => {
@@ -165,7 +167,7 @@ describe.skipIf(!process.env.RUN_INTEGRATION_TESTS)("session load/resume lifecyc
       requestPermission: async () => ({ outcome: { outcome: "cancelled" } }),
       readTextFile: async () => ({ content: "" }),
       writeTextFile: async () => ({}),
-    } as unknown as AgentSideConnection;
+    } as unknown as AcpClient;
 
     const commandName =
       "<command-name>/model</command-name>\n            <command-message>model</command-message>\n            <command-args>opus</command-args>";
@@ -274,7 +276,7 @@ describe.skipIf(!process.env.RUN_INTEGRATION_TESTS)("session load/resume lifecyc
       requestPermission: async () => ({ outcome: { outcome: "cancelled" } }),
       readTextFile: async () => ({ content: "" }),
       writeTextFile: async () => ({}),
-    } as unknown as AgentSideConnection;
+    } as unknown as AcpClient;
 
     // Exact shape from https://github.com/zed-industries/claude-code-acp/issues/579.
     const concatenated =
@@ -330,4 +332,52 @@ describe.skipIf(!process.env.RUN_INTEGRATION_TESTS)("session load/resume lifecyc
     }
     expect(recordedUserChunks.some((c) => c.includes("hi"))).toBe(true);
   }, 60000);
+
+  // Regression test for https://github.com/agentclientprotocol/claude-agent-acp/issues/845
+  // On resume the CLI restores the model the session's transcript was running,
+  // so loadSession must report that live model instead of recomputing the
+  // env/settings/default choice from scratch. Haiku is used because no account
+  // resolves its default there, so the restored model provably differs from
+  // the freshly-computed default. Requires no ANTHROPIC_MODEL env var and no
+  // "model" key in settings.json (either would pin the model on resume and
+  // mask the reconciliation this test covers).
+  it("ACP: loadSession reports the model the resumed session is actually running", async () => {
+    const agentChunks: string[] = [];
+    const client = createMockClient(async (notification) => {
+      if (notification.update.sessionUpdate === "agent_message_chunk") {
+        const content = notification.update.content;
+        if (content.type === "text") agentChunks.push(content.text);
+      }
+    });
+
+    const modelOf = (opts: { id: string; currentValue?: unknown }[] | null | undefined) =>
+      opts?.find((o) => o.id === "model")?.currentValue;
+
+    const agent = new ClaudeAcpAgent(client);
+    try {
+      const cwd = process.cwd();
+      const { sessionId, configOptions } = await agent.newSession({ cwd, mcpServers: [] });
+      expect(modelOf(configOptions)).not.toBe("haiku");
+
+      await agent.setSessionConfigOption({ sessionId, configId: "model", value: "haiku" });
+      // A real turn on Haiku, so the transcript's last assistant message —
+      // which is what the CLI restores the model from — records it.
+      await agent.prompt({
+        sessionId,
+        prompt: [{ type: "text", text: "Reply with only the word OK" }],
+      });
+      await agent.closeSession({ sessionId });
+
+      const loadResp = await agent.loadSession({ sessionId, cwd, mcpServers: [] });
+      expect(modelOf(loadResp.configOptions)).toBe("haiku");
+
+      // And the reported option agrees with the live session (`/context`).
+      agentChunks.length = 0;
+      await agent.prompt({ sessionId, prompt: [{ type: "text", text: "/context" }] });
+      const liveModel = agentChunks.join("\n").match(/\*\*Model:\*\*\s*(\S+)/)?.[1];
+      expect(liveModel).toContain("haiku");
+    } finally {
+      await agent.dispose();
+    }
+  }, 120000);
 });
