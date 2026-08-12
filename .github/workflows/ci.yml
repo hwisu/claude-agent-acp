@@ -26,7 +26,7 @@ jobs:
       - name: Set up aube + Node.js
         uses: endevco/aube-action@v1
         with:
-          node-version: "lts/*"
+          node-version: "22.22.0"
 
       - name: Install dependencies (frozen lockfile)
         run: aube ci
