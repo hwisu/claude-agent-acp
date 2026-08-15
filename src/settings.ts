@@ -5,6 +5,7 @@ import * as path from "node:path";
 import {
   filterEscalatingDefaultMode,
   resolveSettings,
+  type SettingSource,
   type Settings,
 } from "@anthropic-ai/claude-agent-sdk";
 import { CLAUDE_CONFIG_DIR } from "./acp-agent.js";
@@ -51,6 +52,8 @@ export function getManagedSettingsPath(): string {
 export interface SettingsManagerOptions {
   onChange?: () => void;
   logger?: Logger;
+  settingSources?: SettingSource[];
+  managedSettings?: Settings;
 }
 
 /**
@@ -68,6 +71,8 @@ export class SettingsManager {
   private watchers: fs.FSWatcher[] = [];
   private onChange?: () => void;
   private logger: Logger;
+  private settingSources?: SettingSource[];
+  private managedSettings?: Settings;
   private initialized = false;
   private disposed = false;
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -77,6 +82,8 @@ export class SettingsManager {
     this.cwd = cwd;
     this.onChange = options?.onChange;
     this.logger = options?.logger ?? console;
+    this.settingSources = options?.settingSources;
+    this.managedSettings = options?.managedSettings;
   }
 
   /**
@@ -106,10 +113,12 @@ export class SettingsManager {
    * containing directories means we pick up file creation as well as edits.
    */
   private getWatchedPaths(): string[] {
+    const includes = (source: SettingSource) =>
+      this.settingSources === undefined || this.settingSources.includes(source);
     return [
-      path.join(CLAUDE_CONFIG_DIR, "settings.json"),
-      path.join(this.cwd, ".claude", "settings.json"),
-      path.join(this.cwd, ".claude", "settings.local.json"),
+      ...(includes("user") ? [path.join(CLAUDE_CONFIG_DIR, "settings.json")] : []),
+      ...(includes("project") ? [path.join(this.cwd, ".claude", "settings.json")] : []),
+      ...(includes("local") ? [path.join(this.cwd, ".claude", "settings.local.json")] : []),
       getManagedSettingsPath(),
     ];
   }
@@ -120,7 +129,11 @@ export class SettingsManager {
    */
   private async loadAllSettings(): Promise<void> {
     try {
-      const resolved = await resolveSettings({ cwd: this.cwd });
+      const resolved = await resolveSettings({
+        cwd: this.cwd,
+        settingSources: this.settingSources,
+        managedSettings: this.managedSettings,
+      });
       this.effective = filterEscalatingDefaultMode(resolved);
     } catch (error) {
       this.logger.error("Failed to resolve settings:", error);

@@ -478,7 +478,7 @@ describe("refusalFallbackToCreateRequest", () => {
     expect(choice.oneOf[0].title).toContain("claude-opus-4-8");
     // Each option explains its consequence in the description field.
     expect(choice.oneOf[0].description).toContain("claude-opus-4-8");
-    expect(choice.oneOf[1].description).toBeTruthy();
+    expect(choice.oneOf[1].description).toBe("You can send a new message.");
   });
 
   it("omits the category marker and appends guidance when provided", () => {

@@ -151,7 +151,14 @@ import {
   toolUpdateFromDiffToolResponse,
   toolUpdateFromToolResult,
 } from "./tools.js";
-import { Logger, nodeToWebReadable, nodeToWebWritable, Pushable, unreachable } from "./utils.js";
+import {
+  Logger,
+  nodeToWebReadable,
+  nodeToWebWritable,
+  Pushable,
+  sleep,
+  unreachable,
+} from "./utils.js";
 
 /** Internal model state tracking (SessionModelState was removed from ACP SDK 0.25). */
 interface ModelState {
@@ -203,6 +210,37 @@ const ZERO_USAGE = Object.freeze({
 });
 
 const DEFAULT_CONTEXT_WINDOW = 200000;
+
+function isReplayApiMessage(
+  value: unknown,
+): value is { role: "user" | "assistant"; content: unknown } {
+  if (value === null || typeof value !== "object") return false;
+  if (!("role" in value) || !("content" in value)) return false;
+  return value.role === "user" || value.role === "assistant";
+}
+
+function isClaudePlanEntry(value: unknown): value is ClaudePlanEntry {
+  if (value === null || typeof value !== "object") return false;
+  if (!("content" in value) || typeof value.content !== "string") return false;
+  if (
+    "activeForm" in value &&
+    value.activeForm !== undefined &&
+    typeof value.activeForm !== "string"
+  ) {
+    return false;
+  }
+  return (
+    "status" in value &&
+    (value.status === "pending" || value.status === "in_progress" || value.status === "completed")
+  );
+}
+
+function planInputFromUnknown(value: unknown): { todos: ClaudePlanEntry[] } | undefined {
+  if (value === null || typeof value !== "object" || !("todos" in value)) return undefined;
+  return Array.isArray(value.todos) && value.todos.every(isClaudePlanEntry)
+    ? { todos: value.todos }
+    : undefined;
+}
 
 /** Floor after `session/cancel` before the adapter forces the active prompt
  *  loop to return "cancelled". `query.interrupt()` normally makes the SDK
@@ -5191,6 +5229,15 @@ export class ClaudeAcpAgent {
 
     await this.applyConfigOptionValue(params.sessionId, session, params.configId, resolvedValue);
 
+    // A model switch can also clamp the permission mode and change the
+    // supported/default effort level. Both SDK control operations can rebuild
+    // the flag layer and restore the query's original settings model. Re-assert
+    // the user's model last so our reported configOptions agree with the next
+    // turn even when either secondary setting changed.
+    if (params.configId === MODEL_CONFIG_ID) {
+      await session.query.setModel(resolvedValue);
+    }
+
     return { configOptions: session.configOptions };
   }
 
@@ -5224,8 +5271,7 @@ export class ClaudeAcpAgent {
         }
         throw error;
       } else {
-        // eslint-disable-next-line preserve-caught-error
-        throw new Error(`Invalid mode: ${modeId}`);
+        throw new Error(`Invalid mode: ${modeId}`, { cause: error });
       }
     }
   }
@@ -5255,13 +5301,18 @@ export class ClaudeAcpAgent {
         continue;
       }
 
-      // @ts-expect-error - untyped in SDK but we handle all of these
+      if (!isReplayApiMessage(message.message)) {
+        this.logger.error(
+          `Session ${sessionId}: ignoring malformed replay message ${message.uuid}`,
+        );
+        continue;
+      }
       let content: unknown = message.message.content;
       const parentToolUseId = parentToolUseIdOf(message);
       if (message.type === "assistant" && parentToolUseId && !forwardSubagentText) {
         content = stripSubagentTextAndThinking(content);
       }
-      const role = (message.message as { role: "user" | "assistant" }).role;
+      const role = message.message.role;
       if (role === "user") {
         content = stripLocalCommandMetadata(content);
         if (content === null) continue;
@@ -6363,9 +6414,15 @@ export class ClaudeAcpAgent {
     }
 
     const input = new Pushable<SDKUserMessage>();
+    // Extract SDK options before resolving settings so the adapter observes
+    // the exact same source selection and managed policy as the SDK query.
+    const sessionMeta = params._meta as NewSessionMeta | undefined;
+    const userProvidedOptions = sessionMeta?.claudeCode?.options;
 
     const settingsManager = new SettingsManager(params.cwd, {
       logger: this.logger,
+      settingSources: userProvidedOptions?.settingSources,
+      managedSettings: userProvidedOptions?.managedSettings,
     });
     await settingsManager.initialize();
 
@@ -6437,9 +6494,6 @@ export class ClaudeAcpAgent {
       this.logger,
     );
 
-    // Extract options from _meta if provided
-    const sessionMeta = params._meta as NewSessionMeta | undefined;
-    const userProvidedOptions = sessionMeta?.claudeCode?.options;
     const forwardSubagentText =
       supportsSubagentTranscript(this.clientCapabilities) ||
       userProvidedOptions?.forwardSubagentText === true;
@@ -6679,6 +6733,8 @@ export class ClaudeAcpAgent {
 
     const { modelState: models, resumedContextWindow } = await getAvailableModels(
       q,
+      sessionId,
+      params.cwd,
       allowedModels,
       initializationResult.models,
       settingsManager,
@@ -7697,36 +7753,87 @@ export function applyAvailableModelsAllowlist(
   return result;
 }
 
-/** Read the model a resumed session is actually running (via the
- *  `getContextUsage` control request — the same source `/context` prints) and
- *  map it onto the picker, along with the report's authoritative context
- *  window (`rawMaxTokens`). Resumed sessions get this request serviced before
- *  any turn runs in the new process — unlike fresh sessions, where it stalls
- *  until the first prompt turn (issues #886/#880) — so the same response that
- *  restores the live model (issue #845) also seeds the window for free,
- *  covering post-restart reloads of models the text heuristic misses (issue
- *  #596). Best-effort: a control-request failure is logged and returns nulls
- *  so callers keep their current choice; failing the whole session/load over
- *  an unreadable report would be worse. */
+/** Read the model a resumed session is actually running from its persisted
+ *  assistant messages, then use `getContextUsage` (the source `/context`
+ *  prints) as a fallback and as the authoritative context-window report.
+ *  Resumed sessions service that control request before any turn runs in the
+ *  new process — unlike fresh sessions, where it stalls until the first prompt
+ *  turn (issues #886/#880). When the report and transcript disagree, the
+ *  transcript wins because it records the model the CLI restores (issue #845),
+ *  while a matching report also seeds `rawMaxTokens` for post-restart reloads
+ *  (issue #596). Both reads are best-effort so an unreadable report or
+ *  transcript never fails the whole session/load. */
 async function readResumedLiveModel(
   query: Query,
+  sessionId: string,
+  cwd: string,
   models: ModelInfo[],
   logger: Logger,
 ): Promise<{ model: ModelInfo | null; contextWindow: number | null }> {
+  const transcriptModel = await readPersistedAssistantModel(sessionId, cwd, logger);
+
   try {
     const usage = await query.getContextUsage();
+    const usageModel = usage.model ? matchResumedModel(models, usage.model) : null;
+    const transcriptMatch = transcriptModel ? matchResumedModel(models, transcriptModel) : null;
+    const model = transcriptMatch ?? usageModel;
+    const usageMatchesModel =
+      model === null || usageModel === null || model.value === usageModel.value;
+    if (transcriptMatch && usageModel && transcriptMatch.value !== usageModel.value) {
+      logger.error(
+        `Resumed session ${sessionId}: transcript model "${transcriptMatch.value}" ` +
+          `disagrees with pre-turn context report "${usageModel.value}"; using the transcript.`,
+      );
+    }
     return {
-      model: usage.model ? matchResumedModel(models, usage.model) : null,
-      contextWindow: usage.rawMaxTokens > 0 ? usage.rawMaxTokens : null,
+      model,
+      contextWindow: usageMatchesModel && usage.rawMaxTokens > 0 ? usage.rawMaxTokens : null,
     };
   } catch (error) {
     logger.error("Failed to read the resumed session's live model:", error);
-    return { model: null, contextWindow: null };
+    return {
+      model: transcriptModel ? matchResumedModel(models, transcriptModel) : null,
+      contextWindow: null,
+    };
   }
+}
+
+async function readPersistedAssistantModel(
+  sessionId: string,
+  cwd: string,
+  logger: Logger,
+): Promise<string | undefined> {
+  let lastError: unknown;
+  // The CLI appends transcript entries before close() returns, but the SDK's
+  // chain reader can briefly observe an incomplete tail and return []. A
+  // bounded retry keeps immediate close -> load flows from falling back to the
+  // settings default while adding no delay once the transcript is readable.
+  for (const delayMs of [0, 25, 50, 100]) {
+    if (delayMs > 0) await sleep(delayMs);
+    try {
+      const messages = await getSessionMessages(sessionId, { dir: cwd });
+      for (let index = messages.length - 1; index >= 0; index--) {
+        const message = messages[index];
+        if (message.type !== "assistant" || message.parent_tool_use_id !== null) continue;
+        if (message.message === null || typeof message.message !== "object") continue;
+        if (!("model" in message.message) || typeof message.message.model !== "string") continue;
+        if (message.message.model !== "<synthetic>") return message.message.model;
+      }
+      lastError = undefined;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  if (lastError !== undefined) {
+    logger.error("Failed to read the resumed session transcript model:", lastError);
+  }
+  return undefined;
 }
 
 async function getAvailableModels(
   query: Query,
+  sessionId: string,
+  cwd: string,
   models: ModelInfo[],
   sdkModels: ModelInfo[],
   settingsManager: SettingsManager,
@@ -7770,7 +7877,7 @@ async function getAvailableModels(
   // the SDK is already running this model, and pushing a picker alias back
   // (e.g. "opus[1m]") could change the live model rather than describe it.
   if (resolvedFromInput === undefined && isResumedSession) {
-    const live = await readResumedLiveModel(query, models, logger);
+    const live = await readResumedLiveModel(query, sessionId, cwd, models, logger);
     currentModel = live.model ?? currentModel;
     resumedContextWindow = live.contextWindow;
   }
@@ -7805,7 +7912,7 @@ async function getAvailableModels(
       // pin the session isn't running.
       if (!isResumedSession) throw error;
       logger.error(`Failed to re-assert model "${currentModel.value}" on resume:`, error);
-      const live = await readResumedLiveModel(query, models, logger);
+      const live = await readResumedLiveModel(query, sessionId, cwd, models, logger);
       currentModel = live.model ?? currentModel;
       resumedContextWindow = live.contextWindow;
     }
@@ -8345,11 +8452,11 @@ export function toAcpNotifications(
         const alreadyCached = chunk.id in toolUseCache;
         toolUseCache[chunk.id] = chunk;
         if (chunk.name === "TodoWrite") {
-          // @ts-expect-error - sometimes input is empty object or undefined
-          if (Array.isArray(chunk.input?.todos)) {
+          const planInput = planInputFromUnknown(chunk.input);
+          if (planInput) {
             update = {
               sessionUpdate: "plan",
-              entries: planEntries(chunk.input as { todos: ClaudePlanEntry[] }),
+              entries: planEntries(planInput),
             };
           }
         } else if (isTaskTool(chunk.name)) {
@@ -8821,51 +8928,54 @@ export function runAcp() {
 
   const stream = ndJsonStream(input, output);
 
-  // `connect(...)` returns a connection-scoped peer handle (`connection.client`)
-  // that stays valid for the whole connection, so the agent captures it once.
-  // Handlers close over `agent`, which is assigned synchronously right after
-  // `connect()` returns — before the connection processes any inbound message.
-  // It cannot be `const`: its value depends on `connection.client`, which does
-  // not exist until `connect()` has been called.
-  // eslint-disable-next-line prefer-const
-  let agent: ClaudeAcpAgent;
+  // `connect(...)` returns the client handle needed to construct the agent,
+  // while handlers need an agent reference during builder construction. Keep
+  // that circular initialization explicit and fail loudly if a connection ever
+  // dispatches synchronously before the assignment below.
+  const agentRef: { current?: ClaudeAcpAgent } = {};
+  const agent = (): ClaudeAcpAgent => {
+    if (!agentRef.current) throw new Error("ACP agent received a request before initialization");
+    return agentRef.current;
+  };
   const connection = acpAgent({ name: "claude-code-acp" })
-    .onRequest(methods.agent.initialize, (ctx) => agent.initialize(ctx.params))
-    .onRequest(methods.agent.session.new, (ctx) => agent.newSession(ctx.params))
-    .onRequest(methods.agent.session.load, (ctx) => agent.loadSession(ctx.params))
-    .onRequest(methods.agent.session.fork, (ctx) => agent.unstable_forkSession(ctx.params))
-    .onRequest(methods.agent.session.list, (ctx) => agent.listSessions(ctx.params))
-    .onRequest(methods.agent.session.delete, (ctx) => agent.deleteSession(ctx.params))
-    .onRequest(methods.agent.session.resume, (ctx) => agent.resumeSession(ctx.params))
-    .onRequest(methods.agent.session.close, (ctx) => agent.closeSession(ctx.params))
-    .onRequest(methods.agent.session.setMode, (ctx) => agent.setSessionMode(ctx.params))
+    .onRequest(methods.agent.initialize, (ctx) => agent().initialize(ctx.params))
+    .onRequest(methods.agent.session.new, (ctx) => agent().newSession(ctx.params))
+    .onRequest(methods.agent.session.load, (ctx) => agent().loadSession(ctx.params))
+    .onRequest(methods.agent.session.fork, (ctx) => agent().unstable_forkSession(ctx.params))
+    .onRequest(methods.agent.session.list, (ctx) => agent().listSessions(ctx.params))
+    .onRequest(methods.agent.session.delete, (ctx) => agent().deleteSession(ctx.params))
+    .onRequest(methods.agent.session.resume, (ctx) => agent().resumeSession(ctx.params))
+    .onRequest(methods.agent.session.close, (ctx) => agent().closeSession(ctx.params))
+    .onRequest(methods.agent.session.setMode, (ctx) => agent().setSessionMode(ctx.params))
     .onRequest(methods.agent.session.setConfigOption, (ctx) =>
-      agent.setSessionConfigOption(ctx.params),
+      agent().setSessionConfigOption(ctx.params),
     )
-    .onRequest(methods.agent.authenticate, (ctx) => agent.authenticate(ctx.params))
-    .onRequest(methods.agent.providers.list, (ctx) => agent.unstable_listProviders(ctx.params))
-    .onRequest(methods.agent.providers.set, (ctx) => agent.unstable_setProvider(ctx.params))
-    .onRequest(methods.agent.providers.disable, (ctx) => agent.unstable_disableProvider(ctx.params))
-    .onRequest(methods.agent.logout, (ctx) => agent.logout(ctx.params))
+    .onRequest(methods.agent.authenticate, (ctx) => agent().authenticate(ctx.params))
+    .onRequest(methods.agent.providers.list, (ctx) => agent().unstable_listProviders(ctx.params))
+    .onRequest(methods.agent.providers.set, (ctx) => agent().unstable_setProvider(ctx.params))
+    .onRequest(methods.agent.providers.disable, (ctx) =>
+      agent().unstable_disableProvider(ctx.params),
+    )
+    .onRequest(methods.agent.logout, (ctx) => agent().logout(ctx.params))
     .onRequest(methods.agent.session.prompt, (ctx) =>
-      runPromptWithCancellation(agent, ctx.params, ctx.signal),
+      runPromptWithCancellation(agent(), ctx.params, ctx.signal),
     )
-    .onNotification(methods.agent.session.cancel, (ctx) => agent.cancel(ctx.params))
+    .onNotification(methods.agent.session.cancel, (ctx) => agent().cancel(ctx.params))
     .onRequest<SteerRequest, SteerResponse>(STEER_METHOD, { parse: parseSteerRequest }, (ctx) =>
-      agent.steer(ctx.params),
+      agent().steer(ctx.params),
     )
     .onRequest<GoalRequest, GoalControlResponse>(
       GOAL_CONTROL_METHOD,
       { parse: parseGoalRequest },
-      (ctx) => agent.goal(ctx.params),
+      (ctx) => agent().goal(ctx.params),
     )
     .connect(stream);
 
-  agent = new ClaudeAcpAgent(new ClientConnection(connection.client));
-  return { connection, agent };
+  agentRef.current = new ClaudeAcpAgent(new ClientConnection(connection.client));
+  return { connection, agent: agentRef.current };
 }
 
-function commonPrefixLength(a: string, b: string) {
+function commonPrefixLength(a: string, b: string): number {
   let i = 0;
   while (i < a.length && i < b.length && a[i] === b[i]) {
     i++;

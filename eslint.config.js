@@ -52,5 +52,12 @@ export default [
       curly: ["error", "all"],
     },
   },
+  {
+    files: ["src/**/*.ts"],
+    ignores: ["src/tests/**/*.ts"],
+    rules: {
+      "@typescript-eslint/no-explicit-any": "error",
+    },
+  },
   prettierConfig,
 ];

@@ -105,6 +105,12 @@ type AcpTerminalExitInfo = {
   timedOut: boolean;
 };
 
+function isTextContent<T>(value: T): value is T & { text: string } {
+  return (
+    value !== null && typeof value === "object" && "text" in value && typeof value.text === "string"
+  );
+}
+
 export function parseAcpTerminalMeta(text: string): {
   cleaned: string;
   info: AcpTerminalExitInfo | null;
@@ -448,7 +454,7 @@ export function toolInfoFromToolUse(
       const input = toolUse.input as TodoWriteInput | undefined;
       return {
         title: Array.isArray(input?.todos)
-          ? `Update TODOs: ${input.todos.map((todo: any) => todo.content).join(", ")}`
+          ? `Update TODOs: ${input.todos.map((todo) => todo.content).join(", ")}`
           : "Update TODOs",
         kind: "think",
         content: [],
@@ -747,7 +753,7 @@ export function toolUpdateFromToolResult(
       }
       if (Array.isArray(toolResult.content) && toolResult.content.length > 0) {
         return {
-          content: toolResult.content.map((content: any) => ({
+          content: toolResult.content.map((content) => ({
             type: "content",
             content:
               content.type === "text"
@@ -857,11 +863,9 @@ export function toolUpdateFromToolResult(
       } else if (typeof result === "string") {
         output = result;
       } else if (Array.isArray(result) && result.length > 0) {
-        const textOnly = result.every(
-          (c: any) => c && typeof c === "object" && typeof c.text === "string",
-        );
-        if (textOnly) {
-          output = result.map((c: any) => c.text).join("\n");
+        const textContents = result.filter(isTextContent);
+        if (textContents.length === result.length) {
+          output = textContents.map((content) => content.text).join("\n");
         } else {
           // Image (or mixed non-text) content. Binary payloads can't be
           // streamed through the terminal-output _meta channel, so bypass
@@ -1038,14 +1042,14 @@ function formatWebSearchHit(hit: { title: string; url: string }): string {
 }
 
 function toAcpContentUpdate(
-  content: any,
+  content: unknown,
   isError: boolean = false,
 ): { content?: ToolCallContent[] } {
   if (Array.isArray(content) && content.length > 0) {
     return {
-      content: content.map((c: any) => ({
+      content: content.map((item) => ({
         type: "content" as const,
-        content: toAcpContentBlock(c, isError),
+        content: toAcpContentBlock(item, isError),
       })),
     };
   } else if (typeof content === "object" && content !== null) {
@@ -1073,14 +1077,15 @@ function toAcpContentUpdate(
   return {};
 }
 
-function toAcpContentBlock(
-  content: ToolResultContent | Record<string, unknown>,
-  isError: boolean,
-): ContentBlock {
+function toAcpContentBlock(content: unknown, isError: boolean): ContentBlock {
   const wrapText = (text: string): ContentBlock => ({
     type: "text" as const,
     text: isError ? `\`\`\`\n${text}\n\`\`\`` : text,
   });
+
+  if (!content || typeof content !== "object") {
+    return wrapText(String(content ?? ""));
+  }
 
   const typed = content as ToolResultContent;
 
@@ -1147,7 +1152,7 @@ function toAcpContentBlock(
 export type ClaudePlanEntry = {
   content: string;
   status: "pending" | "in_progress" | "completed";
-  activeForm: string;
+  activeForm?: string;
 };
 
 export function planEntries(input: { todos: ClaudePlanEntry[] } | undefined): PlanEntry[] {
@@ -1490,7 +1495,7 @@ export const registerHookCallback = (
 /* A callback for Claude Code that is called when receiving a PostToolUse hook */
 export const createPostToolUseHook =
   (options?: { onEnterPlanMode?: () => Promise<void> }): HookCallback =>
-  async (input: any, toolUseID: string | undefined): Promise<{ continue: boolean }> => {
+  async (input, toolUseID): Promise<{ continue: boolean }> => {
     if (input.hook_event_name === "PostToolUse") {
       // Handle EnterPlanMode tool - notify client of mode change after successful execution
       if (input.tool_name === "EnterPlanMode" && options?.onEnterPlanMode) {

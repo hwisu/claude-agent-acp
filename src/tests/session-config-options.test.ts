@@ -699,6 +699,10 @@ describe("session config options", () => {
       });
 
       expect(applyFlagSettingsSpy).toHaveBeenCalledWith({ effortLevel: null });
+      expect(setModelSpy).toHaveBeenCalledTimes(2);
+      expect(setModelSpy.mock.invocationCallOrder.at(-1)).toBeGreaterThan(
+        applyFlagSettingsSpy.mock.invocationCallOrder.at(-1)!,
+      );
     });
 
     it("adds effort option when switching to a model that supports effort", async () => {
@@ -1197,6 +1201,10 @@ describe("session config options", () => {
       });
 
       expect(setPermissionModeSpy).toHaveBeenCalledWith("default");
+      expect(setModelSpy).toHaveBeenCalledTimes(2);
+      expect(setModelSpy.mock.invocationCallOrder.at(-1)).toBeGreaterThan(
+        setPermissionModeSpy.mock.invocationCallOrder.at(-1)!,
+      );
 
       const modeUpdates = sessionUpdates.filter(
         (n) => n.update.sessionUpdate === "current_mode_update",
