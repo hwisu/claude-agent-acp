@@ -1979,7 +1979,7 @@ describe("prompt conversion", () => {
   });
 });
 
-describe.skipIf(!process.env.RUN_INTEGRATION_TESTS)("SDK behavior", () => {
+describe("SDK initialization behavior", () => {
   it("finds vendored cli path", async () => {
     const path = await claudeCliPath();
     expect(path).toMatch(/@anthropic-ai\/claude-agent-sdk-[^/]+\/claude(\.exe)?$/);
@@ -2007,7 +2007,9 @@ describe.skipIf(!process.env.RUN_INTEGRATION_TESTS)("SDK behavior", () => {
     const { value } = await q.next();
     expect(value).toMatchObject({ type: "system", session_id: sessionId });
   }, 10000);
+});
 
+describe.skipIf(!process.env.RUN_INTEGRATION_TESTS)("SDK live model behavior", () => {
   // Pins the SDK invariant our `messageId` plumbing relies on: the Anthropic
   // API message id is available at `message_start` (before any delta), is the
   // same on the consolidated assistant message, and is recoverable from the
@@ -2053,7 +2055,7 @@ describe.skipIf(!process.env.RUN_INTEGRATION_TESTS)("SDK behavior", () => {
     // The API message id is present at message_start (before deltas), so we can
     // tag every streamed chunk with it, and it is identical on the consolidated
     // assistant message.
-    expect(messageStartApiId).toBeTruthy();
+    expect(messageStartApiId).toMatch(/^msg_[A-Za-z0-9_-]+$/);
     expect(sawDelta).toBe(true);
     expect(allPartialsTopLevel).toBe(true);
     expect(consolidatedApiId).toBe(messageStartApiId);

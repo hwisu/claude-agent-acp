@@ -66,6 +66,36 @@ describe("SettingsManager", () => {
       expect(settings.model).toBe("claude-3-5-haiku");
     });
 
+    it("resolves only the setting sources selected for the SDK query", async () => {
+      const claudeDir = path.join(tempDir, ".claude");
+      const userConfigDir = process.env.CLAUDE_CONFIG_DIR;
+      if (!userConfigDir) throw new Error("test setup must define CLAUDE_CONFIG_DIR");
+      await fs.promises.mkdir(claudeDir, { recursive: true });
+      await fs.promises.writeFile(
+        path.join(userConfigDir, "settings.json"),
+        JSON.stringify({ model: "user-model" }),
+      );
+      await fs.promises.writeFile(
+        path.join(claudeDir, "settings.json"),
+        JSON.stringify({ model: "project-model" }),
+      );
+
+      settingsManager = new SettingsManager(tempDir, {
+        settingSources: [],
+        managedSettings: {},
+      });
+      await settingsManager.initialize();
+      expect(settingsManager.getSettings().model).toBeUndefined();
+
+      settingsManager.dispose();
+      settingsManager = new SettingsManager(tempDir, {
+        settingSources: ["project"],
+        managedSettings: {},
+      });
+      await settingsManager.initialize();
+      expect(settingsManager.getSettings().model).toBe("project-model");
+    });
+
     it("should expose availableModels from settings", async () => {
       const claudeDir = path.join(tempDir, ".claude");
       await fs.promises.mkdir(claudeDir, { recursive: true });

@@ -10,8 +10,9 @@ import { discoverCustomAgents, BUILTIN_AGENT_NAMES } from "../acp-agent.js";
 // SDK's `AgentInfo` carries no built-in/source flag. That hardcoded set drifts
 // silently if the SDK changes its default roster: a newly added built-in would
 // leak into the ACP "Agent" picker as if the user had configured it. This
-// integration test runs the real SDK so the set is flagged the moment it does.
-describe.skipIf(!process.env.RUN_INTEGRATION_TESTS)("agent discovery (SDK)", () => {
+// test runs the real SDK without making a model request, so it remains in the
+// default suite and flags drift even on unauthenticated CI workers.
+describe("agent discovery (SDK)", () => {
   it("BUILTIN_AGENT_NAMES exactly covers the SDK's default agent roster", async () => {
     const input = new Pushable<SDKUserMessage>();
     const q = query({

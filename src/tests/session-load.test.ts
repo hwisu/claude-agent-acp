@@ -17,7 +17,7 @@ function createMockClient(
   } as unknown as AcpClient;
 }
 
-describe.skipIf(!process.env.RUN_INTEGRATION_TESTS)("session load/resume lifecycle", () => {
+describe("session load/resume lifecycle", () => {
   it("SDK: session created but never prompted has no messages and is not resumable", async () => {
     // Create a session via the SDK, initialize it, but never send a prompt
     const sessionId = randomUUID();
@@ -147,7 +147,12 @@ describe.skipIf(!process.env.RUN_INTEGRATION_TESTS)("session load/resume lifecyc
       await agentB.dispose();
     }
   }, 30000);
+});
 
+// These cases persist at least one real model response before reloading the
+// session. Keep the expensive/authenticated contract explicit; the five
+// initialization-only lifecycle cases above always run in the default suite.
+describe.skipIf(!process.env.RUN_INTEGRATION_TESTS)("session load/resume live lifecycle", () => {
   // Regression test for https://github.com/zed-industries/claude-code-acp/issues/579
   // The client (Zed) renders its own local slash commands — e.g. `/model` —
   // by injecting user-message prompts whose text is wrapped in
@@ -338,9 +343,9 @@ describe.skipIf(!process.env.RUN_INTEGRATION_TESTS)("session load/resume lifecyc
   // so loadSession must report that live model instead of recomputing the
   // env/settings/default choice from scratch. Haiku is used because no account
   // resolves its default there, so the restored model provably differs from
-  // the freshly-computed default. Requires no ANTHROPIC_MODEL env var and no
-  // "model" key in settings.json (either would pin the model on resume and
-  // mask the reconciliation this test covers).
+  // the freshly-computed default. The request explicitly selects no settings
+  // sources so a developer's user/project model cannot pin the resumed query
+  // and mask the reconciliation this test covers.
   it("ACP: loadSession reports the model the resumed session is actually running", async () => {
     const agentChunks: string[] = [];
     const client = createMockClient(async (notification) => {
@@ -356,7 +361,16 @@ describe.skipIf(!process.env.RUN_INTEGRATION_TESTS)("session load/resume lifecyc
     const agent = new ClaudeAcpAgent(client);
     try {
       const cwd = process.cwd();
-      const { sessionId, configOptions } = await agent.newSession({ cwd, mcpServers: [] });
+      const isolatedSettings = {
+        claudeCode: {
+          options: { settingSources: [] as Array<"user" | "project" | "local"> },
+        },
+      };
+      const { sessionId, configOptions } = await agent.newSession({
+        cwd,
+        mcpServers: [],
+        _meta: isolatedSettings,
+      });
       expect(modelOf(configOptions)).not.toBe("haiku");
 
       await agent.setSessionConfigOption({ sessionId, configId: "model", value: "haiku" });
@@ -368,7 +382,12 @@ describe.skipIf(!process.env.RUN_INTEGRATION_TESTS)("session load/resume lifecyc
       });
       await agent.closeSession({ sessionId });
 
-      const loadResp = await agent.loadSession({ sessionId, cwd, mcpServers: [] });
+      const loadResp = await agent.loadSession({
+        sessionId,
+        cwd,
+        mcpServers: [],
+        _meta: isolatedSettings,
+      });
       expect(modelOf(loadResp.configOptions)).toBe("haiku");
 
       // And the reported option agrees with the live session (`/context`).

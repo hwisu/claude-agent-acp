@@ -234,9 +234,9 @@ describe("applyAvailableModelsAllowlist - modelOverrides", () => {
 });
 
 // Runs against the real SDK (no mocks) so the fixture above is flagged the
-// moment the SDK's actual model list shape drifts from it. Requires a usable
-// ANTHROPIC_API_KEY, hence opt-in via RUN_INTEGRATION_TESTS.
-describe.skipIf(!process.env.RUN_INTEGRATION_TESTS)("model resolution (real SDK)", () => {
+// moment the SDK's actual model list shape drifts from it. supportedModels()
+// makes no model request, so these belong in the default unauthenticated suite.
+describe("model resolution (real SDK)", () => {
   it("every model's resolvedModel (when present) resolves back to that same row", async () => {
     const q = query({ prompt: "hi", options: { sessionId: randomUUID() } });
     try {
