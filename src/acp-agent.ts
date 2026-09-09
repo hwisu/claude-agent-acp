@@ -8723,7 +8723,6 @@ export function toAcpNotifications(
       case "compaction":
       case "compaction_delta":
       case "advisor_tool_result":
-      case "mid_conv_system":
       case "fallback":
         break;
 
